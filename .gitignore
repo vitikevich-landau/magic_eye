@@ -1,0 +1,46 @@
+# ── Сборка CMake ────────────────────────────────────────────────────────────
+build/
+out/
+[Bb]uild/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+
+# ── Visual Studio ───────────────────────────────────────────────────────────
+.vs/
+*.slnx
+*.sln
+*.vcxproj*
+*.user
+*.VC.db
+*.VC.opendb
+
+# ── Артефакты компиляции ────────────────────────────────────────────────────
+*.o
+*.obj
+*.exe
+*.dll
+*.lib
+*.a
+*.pdb
+*.ilk
+*.exp
+*.out
+
+# Собранные бинарники этапов (если собирали руками в папках)
+M0_passport/m0
+M1_xray/m1
+M2_anatomy/m2
+M3_vptr_lair/m3
+M4_guild_registry/m4
+
+# ── M5: побочные продукты допроса компилятора ───────────────────────────────
+M5_oracle/probe.o
+M5_oracle/probe.cpp.*.class
+M5_oracle/oracle_report.txt
+
+# ── Прочее ──────────────────────────────────────────────────────────────────
+*.log
+.DS_Store

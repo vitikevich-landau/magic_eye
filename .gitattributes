@@ -1,0 +1,9 @@
+# Единые переводы строк во всём репозитории — LF.
+# Проект собирается и на Linux (GCC), и на Windows (MSVC): MSVC читает LF без
+# проблем, а вот bash-скрипт M5 (oracle.sh) с CRLF на Linux сломается
+# (`\r` в шебанге → «bad interpreter»). Поэтому фиксируем LF, а не даём
+# autocrlf на Windows незаметно переписать окончания строк.
+* text=auto eol=lf
+
+# Явно: шелл-скрипты — всегда LF (критично для запуска под Linux/Docker).
+*.sh text eol=lf
