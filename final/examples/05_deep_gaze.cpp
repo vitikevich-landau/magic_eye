@@ -30,6 +30,7 @@ int main() {
     int mana = 350;
     Scroll scroll{3, &mana, nullptr, nullptr};
     scroll.self = &scroll;
+    eye::inspect(mana, "mana");
     eye::inspect(scroll, "свиток (три указателя)");
 
     Grimoire book;

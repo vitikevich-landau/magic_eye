@@ -47,6 +47,24 @@
 
 namespace eye {
 
+namespace detail {
+// getenv помечен MSVC как deprecated. Возвращаем владеющую строку: на Windows
+// используем _dupenv_s, на POSIX сразу копируем значение из окружения.
+inline std::string env_value(const char* name) {
+#if defined(_WIN32)
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return {};
+    std::string result(value);
+    std::free(value);
+    return result;
+#else
+    const char* value = std::getenv(name);
+    return value == nullptr ? std::string{} : std::string(value);
+#endif
+}
+} // namespace detail
+
 // ════════════════════════════════════════════════════════════════════════════
 //  Палитра (M0). ANSI-коды; при выводе не в терминал отключаются сами.
 //  EYE_COLOR=1 — форсировать цвета (redirect в файл, CI), EYE_COLOR=0 — убрать.
@@ -54,9 +72,10 @@ namespace eye {
 namespace clr {
 inline bool enabled() {
     static const bool on = [] {
-        if (const char* e = std::getenv("EYE_COLOR")) {
-            if (*e == '0') return false;
-            if (*e == '1') {
+        const std::string env = detail::env_value("EYE_COLOR");
+        if (!env.empty()) {
+            if (env.front() == '0') return false;
+            if (env.front() == '1') {
 #if defined(_WIN32)
                 if (_isatty(_fileno(stdout))) {
                     SetConsoleOutputCP(CP_UTF8);
@@ -101,32 +120,78 @@ inline const char* red()    { return code("\033[38;5;131m"); }  // padding
 namespace detail {
 
 // ════════════════════════════════════════════════════════════════════════════
-//  Геометрия. Панель = «│ » + FRAME_W + « │» = PANEL_W колонок; правее — gutter
-//  с выносками. Всё центрируется отступом margin.
+//  Геометрия. Панель = «│ » + frame_w + « │»; правее — gutter с выносками.
+//  К 118 колонкам рамка вырастает до 68, а к 126 выноска — до 48 колонок.
+//  В узком окне сохраняется прежняя 60-колоночная внутренняя сетка.
 // ════════════════════════════════════════════════════════════════════════════
-inline constexpr std::size_t FRAME_W = 60;             // внутренняя ширина рамки
-inline constexpr std::size_t PANEL_W = FRAME_W + 4;    // рамка целиком
-inline constexpr std::size_t GUT_PRE = 4;              // «◄── » / « ├─ »
-inline constexpr std::size_t GUT_TXT = 40;             // бюджет текста выноски
-inline constexpr std::size_t FULL_W  = PANEL_W + GUT_PRE + GUT_TXT;   // 108
+inline constexpr std::size_t MIN_FRAME_W  = 60;
+inline constexpr std::size_t PREF_FRAME_W = 68;
+inline constexpr std::size_t GUT_PRE       = 4;         // «◄── » / « ├─ »
+inline constexpr std::size_t MIN_GUT_TXT   = 40;
+inline constexpr std::size_t PREF_GUT_TXT  = 48;
+inline constexpr std::size_t DEFAULT_TERM_W =
+    PREF_FRAME_W + 4 + GUT_PRE + PREF_GUT_TXT + 2;      // 126
 
-// Колонки схемы памяти (внутри FRAME_W):
+// Колонки схемы памяти (внутри минимальной рамки):
 //   off(6) ␣ кирпич(2) ␣ hex-сетка(23) ␣␣ ascii-сетка(8)
 inline constexpr std::size_t MEM_HEX_COL   = 10;  // старт hex-сетки
 inline constexpr std::size_t MEM_ASCII_COL = 35;  // старт ascii-сетки
 
 struct Geo {
-    std::size_t margin = 0;   // отступ слева (центрирование)
-    bool gutter = true;       // выноски сбоку (false → внутрь рамки)
-    bool full   = false;      // EYE_FULL=1 — не сворачивать длинные регионы
+    std::size_t margin  = 0;              // отступ слева (центрирование)
+    std::size_t frame_w = PREF_FRAME_W;   // внутренняя ширина рамки
+    std::size_t gut_txt = PREF_GUT_TXT;   // бюджет текста выноски
+    bool gutter = true;                   // false → выноски внутрь рамки
+    bool full   = false;                  // EYE_FULL=1 — не сворачивать регионы
 };
 inline Geo& geo() { static Geo g; return g; }
+inline std::size_t frame_width() { return geo().frame_w; }
 
-// Ширина терминала: EYE_WIDTH → WinAPI/ioctl → 110 (redirect в файл).
-inline std::size_t term_width() {
-    if (const char* e = std::getenv("EYE_WIDTH"))
-        if (const int v = std::atoi(e); v > 0) return static_cast<std::size_t>(v);
 #if defined(_WIN32)
+// Обычный conhost умеет менять размер программно; Windows Terminal/ConPTY
+// может отказать — это нормально, тогда раскладка просто подстроится под него.
+inline void widen_console_once() {
+    static const bool done = [] {
+        const std::string resize = env_value("EYE_RESIZE");
+        if (!resize.empty() && resize.front() == '0') return true;
+        if (!_isatty(_fileno(stdout))) return true;
+
+        const HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+        CONSOLE_SCREEN_BUFFER_INFO bi{};
+        if (h == INVALID_HANDLE_VALUE || !GetConsoleScreenBufferInfo(h, &bi))
+            return true;
+
+        const SHORT current =
+            static_cast<SHORT>(bi.srWindow.Right - bi.srWindow.Left + 1);
+        const COORD largest = GetLargestConsoleWindowSize(h);
+        const SHORT desired = static_cast<SHORT>(
+            std::min<std::size_t>(DEFAULT_TERM_W,
+                                  largest.X > 0 ? largest.X : current));
+        if (desired <= current) return true;
+
+        const SHORT required = static_cast<SHORT>(bi.srWindow.Left + desired);
+        if (bi.dwSize.X < required) {
+            COORD size = bi.dwSize;
+            size.X = required;
+            if (!SetConsoleScreenBufferSize(h, size)) return true;
+        }
+        SMALL_RECT window = bi.srWindow;
+        window.Right = static_cast<SHORT>(window.Left + desired - 1);
+        SetConsoleWindowInfo(h, TRUE, &window); // отказ не критичен
+        return true;
+    }();
+    (void)done;
+}
+#endif
+
+// Ширина терминала: EYE_WIDTH → WinAPI/ioctl → разумный размер для redirect.
+inline std::size_t term_width() {
+    const std::string width = env_value("EYE_WIDTH");
+    if (!width.empty())
+        if (const int v = std::atoi(width.c_str()); v > 0)
+            return static_cast<std::size_t>(v);
+#if defined(_WIN32)
+    widen_console_once();
     CONSOLE_SCREEN_BUFFER_INFO bi;
     const HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
     if (h != INVALID_HANDLE_VALUE && GetConsoleScreenBufferInfo(h, &bi))
@@ -137,20 +202,40 @@ inline std::size_t term_width() {
     if (ioctl(fileno(stdout), TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
         return ws.ws_col;
 #endif
-    return 110;
+    return DEFAULT_TERM_W;
 }
 
 // Пересчитать раскладку перед каждой панелью (окно могли растянуть).
 inline void geo_refresh() {
     Geo g;
     const std::size_t w = term_width();
-    g.gutter = w >= FULL_W + 2;
-    g.full   = [] { const char* e = std::getenv("EYE_FULL");
-                    return e && *e == '1'; }();
-    const bool center = [] { const char* e = std::getenv("EYE_CENTER");
-                             return !(e && *e == '0'); }();
+    const std::size_t min_full =
+        MIN_FRAME_W + 4 + GUT_PRE + MIN_GUT_TXT;
+    g.gutter = w >= min_full + 2;
+    if (g.gutter) {
+        std::size_t extra = w - 2 - min_full;
+        const std::size_t frame_extra =
+            std::min(extra, PREF_FRAME_W - MIN_FRAME_W);
+        g.frame_w = MIN_FRAME_W + frame_extra;
+        extra -= frame_extra;
+        g.gut_txt = MIN_GUT_TXT +
+            std::min(extra, PREF_GUT_TXT - MIN_GUT_TXT);
+    } else {
+        const std::size_t available = w > 4 ? w - 4 : MIN_FRAME_W;
+        g.frame_w = std::clamp(available, MIN_FRAME_W, PREF_FRAME_W);
+        g.gut_txt = MIN_GUT_TXT;
+    }
+    g.full = [] {
+        const std::string value = env_value("EYE_FULL");
+        return !value.empty() && value.front() == '1';
+    }();
+    const bool center = [] {
+        const std::string value = env_value("EYE_CENTER");
+        return value.empty() || value.front() != '0';
+    }();
     if (center) {
-        const std::size_t need = g.gutter ? FULL_W : PANEL_W;
+        const std::size_t need = g.frame_w + 4 +
+            (g.gutter ? GUT_PRE + g.gut_txt : 0);
         // Потолок 24: в сверхшироком терминале панель у центра уже не ищут.
         g.margin = w > need ? std::min<std::size_t>((w - need) / 2, 24) : 0;
     }
@@ -161,6 +246,16 @@ inline std::string margin_str() { return std::string(geo().margin, ' '); }
 // ════════════════════════════════════════════════════════════════════════════
 //  Низкоуровневые примитивы текста
 // ════════════════════════════════════════════════════════════════════════════
+// Управляющим байтам не место внутри рамки: '\n' ломает геометрию, ESC может
+// внедрить ANSI-код из пользовательской подписи. UTF-8-байты >= 0x80 сохраняем.
+inline std::string clean_text(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (const unsigned char c : s)
+        out += (c < 0x20 || c == 0x7f) ? ' ' : static_cast<char>(c);
+    return out;
+}
+
 // Видимая ширина простой (без ANSI) строки = число кодовых точек UTF-8.
 // Считаем все байты, кроме continuation-байтов 10xxxxxx. Для нашего набора
 // (ASCII, кириллица, рамки, блоки) 1 кодовая точка = 1 колонка.
@@ -174,18 +269,50 @@ inline std::size_t vwidth(const std::string& s) {
 // Обрезать ПРОСТУЮ строку (без ANSI) до maxcp колонок; при обрезке ставим «…».
 inline std::string clip(const std::string& s, std::size_t maxcp) {
     if (maxcp == 0) return "";
-    if (vwidth(s) <= maxcp) return s;
+    const std::string safe = clean_text(s);
+    if (vwidth(safe) <= maxcp) return safe;
     std::string out;
     std::size_t cps = 0;
-    for (std::size_t i = 0; i < s.size() && cps + 1 < maxcp; ) {
-        const unsigned char c = s[i];
+    for (std::size_t i = 0; i < safe.size() && cps + 1 < maxcp; ) {
+        const unsigned char c = safe[i];
         const std::size_t len =
             c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : 4;
-        out.append(s, i, len);
+        out.append(safe, i, len);
         i += len;
         ++cps;
     }
     return out + "…";
+}
+
+// То же для уже собранной строки с ANSI-кодами. Коды CSI не занимают колонок;
+// если контент неожиданно длиннее бюджета, правая рамка всё равно не съедет.
+inline std::string clip_ansi(const std::string& s, std::size_t maxcp) {
+    if (maxcp == 0) return "";
+    std::string out;
+    std::size_t cps = 0;
+    for (std::size_t i = 0; i < s.size();) {
+        if (s[i] == '\033' && i + 1 < s.size() && s[i + 1] == '[') {
+            const std::size_t end = s.find('m', i + 2);
+            if (end != std::string::npos) {
+                out.append(s, i, end - i + 1);
+                i = end + 1;
+                continue;
+            }
+        }
+        if (cps + 1 >= maxcp) {
+            out += clr::reset();
+            out += "…";
+            return out;
+        }
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        const std::size_t wanted =
+            c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : 4;
+        const std::size_t len = std::min(wanted, s.size() - i);
+        out.append(s, i, len);
+        i += len;
+        ++cps;
+    }
+    return out;
 }
 
 inline std::string ljust(std::string s, std::size_t w) {
@@ -217,9 +344,13 @@ inline std::string hex2(unsigned char b) {         // 1b
 struct Line {
     std::string s;
     std::size_t w = 0;
-    Line& plain(const std::string& t) { s += t; w += vwidth(t); return *this; }
+    Line& plain(const std::string& t) {
+        const std::string safe = clean_text(t);
+        s += safe; w += vwidth(safe); return *this;
+    }
     Line& col(const char* c, const std::string& t) {
-        s += c; s += t; s += clr::reset(); w += vwidth(t); return *this;
+        const std::string safe = clean_text(t);
+        s += c; s += safe; s += clr::reset(); w += vwidth(safe); return *this;
     }
     Line& sp(std::size_t n = 1) { s.append(n, ' '); w += n; return *this; }
     // Дополнить пробелами до колонки x (внутри рамки).
@@ -232,27 +363,34 @@ inline std::string dashes(std::size_t n) {
     return r;
 }
 
-// Рамочная строка контента: │ <content, дополнено до FRAME_W> │ [выноска]
+// Рамочная строка контента: │ <content, дополнено до frame_width()> │ [выноска]
 inline void put(const Line& ln, const Line* gut = nullptr) {
-    const std::size_t pad = ln.w < FRAME_W ? FRAME_W - ln.w : 0;
+    const std::size_t fw = frame_width();
+    const std::size_t body_w = std::min(ln.w, fw);
+    const std::size_t pad = fw - body_w;
     std::cout << margin_str()
-              << clr::grey() << "│" << clr::reset() << ' ' << ln.s
+              << clr::grey() << "│" << clr::reset() << ' '
+              << (ln.w > fw ? clip_ansi(ln.s, fw) : ln.s)
               << std::string(pad, ' ') << ' '
               << clr::grey() << "│" << clr::reset();
-    if (gut != nullptr) std::cout << gut->s;
+    if (gut != nullptr) {
+        const std::size_t budget = GUT_PRE + geo().gut_txt;
+        std::cout << (gut->w > budget ? clip_ansi(gut->s, budget) : gut->s);
+    }
     std::cout << '\n';
 }
 // Рамочная строка с простым серым текстом (для сообщений).
 inline void put_text(const std::string& t) {
-    Line l; l.col(clr::grey(), clip(t, FRAME_W));
+    Line l; l.col(clr::grey(), clip(t, frame_width()));
     put(l);
 }
 inline void put_blank() { put(Line{}); }
 
 // Верх рамки:      ╭─◈ Заголовок ─────╮
 inline void frame_top(const std::string& title) {
-    const std::string t = clip(title, FRAME_W - 3);
-    const std::size_t fill = FRAME_W - vwidth(t) - 2;   // t обрезан → fill >= 1
+    const std::size_t fw = frame_width();
+    const std::string t = clip(title, fw - 3);
+    const std::size_t fill = fw - vwidth(t) - 2;   // t обрезан → fill >= 1
     std::cout << margin_str()
               << clr::grey() << "╭─" << clr::violet() << "◈ " << clr::reset()
               << clr::gold() << t << clr::reset() << ' '
@@ -260,8 +398,9 @@ inline void frame_top(const std::string& title) {
 }
 // Разделитель:     ├─ секция ─────────┤
 inline void frame_sep(const std::string& label) {
-    const std::string l = clip(label, FRAME_W - 2);
-    const std::size_t fill = FRAME_W - vwidth(l) - 1;
+    const std::size_t fw = frame_width();
+    const std::string l = clip(label, fw - 2);
+    const std::size_t fill = fw - vwidth(l) - 1;
     std::cout << margin_str()
               << clr::grey() << "├─ " << clr::reset()
               << clr::gold() << l << clr::reset() << ' '
@@ -270,7 +409,7 @@ inline void frame_sep(const std::string& label) {
 // Низ рамки:       ╰──────────────────╯
 inline void frame_bottom() {
     std::cout << margin_str()
-              << clr::grey() << "╰" << dashes(FRAME_W + 2) << "╯"
+              << clr::grey() << "╰" << dashes(frame_width() + 2) << "╯"
               << clr::reset() << '\n';
 }
 
@@ -434,23 +573,26 @@ inline Line mem_row(const MRow& r, const Region& reg, const unsigned char* base)
 
 // ---- Выноски: текст сбоку от рамки (или внутри — компактный режим) ---------
 
-// «имя · тип · N Б = значение» в жёсткий бюджет: имя ≤ 16, размер всегда,
-// первым режем тип, значение — сколько останется (минимум 6).
+// «имя · тип · N Б = значение» в жёсткий бюджет. Длинное имя можно вынести
+// отдельной строкой (см. region_notes), поэтому здесь имя занимает до половины.
 inline Line field_headline(const FieldInfo& f, std::size_t budget,
-                           bool with_alt = true) {
-    const std::string name = clip(f.name, 16);
+                           bool with_alt = true, bool with_name = true) {
+    const std::size_t name_cap = std::max<std::size_t>(1, budget / 2);
+    const std::string name = with_name ? clip(f.name, name_cap) : "";
     const std::string sz = std::to_string(f.size) + " Б";
     // «= [массив N байт]» дублирует размер — у массивов значение опускаем.
     const bool no_val = f.value.rfind("[массив", 0) == 0;
-    const std::size_t fixed = vwidth(name) + 3 + 3 + vwidth(sz) + 3;  // « · »×2 + « = »
-    const std::size_t val_keep =
-        no_val ? 0 : std::min<std::size_t>(vwidth(f.value), 6);
-    std::size_t type_w = budget > fixed + val_keep ? budget - fixed - val_keep : 6;
-    type_w = std::min(type_w, vwidth(f.type));
 
     Line l;
-    l.col(clr::green(), name).col(clr::grey(), " · ")
-     .col(clr::cyan(), clip(f.type, type_w)).col(clr::grey(), " · ")
+    if (with_name)
+        l.col(clr::green(), name).col(clr::grey(), " · ");
+
+    const std::size_t val_keep =
+        no_val ? 0 : std::min<std::size_t>(vwidth(f.value), 6);
+    const std::size_t suffix = 3 + vwidth(sz) + (no_val ? 0 : 3 + val_keep);
+    const std::size_t type_room =
+        budget > l.w + suffix ? budget - l.w - suffix : 1;
+    l.col(clr::cyan(), clip(f.type, type_room)).col(clr::grey(), " · ")
      .col(clr::grey(), sz);
     if (no_val) return l;
     l.col(clr::grey(), " = ");
@@ -486,6 +628,10 @@ inline void pointer_notes(std::vector<Line>& out, const FieldInfo& f,
         l.col(clr::grey(), "по адресу лежит: ")
          .col(clr::green(), clip(f.pointee, budget > 17 ? budget - 17 : 0));
         out.push_back(l);
+    } else {
+        Line l;
+        l.col(clr::grey(), "значение не читаем: адрес может быть невалиден");
+        out.push_back(l);
     }
 }
 
@@ -519,7 +665,7 @@ inline std::vector<Line> region_notes(const Region& r, const unsigned char* base
             const FieldInfo& f = *r.f;
             if (r.strpart == 1) {          // .ptr — куда смотрит строка
                 Line l;
-                l.col(clr::green(), clip(f.name, 10) + ".ptr")
+                l.col(clr::green(), clip(f.name, std::max<std::size_t>(10, budget / 2)) + ".ptr")
                  .col(clr::grey(), " = ").plain(hexptr(f.target));
                 out.push_back(l);
                 Line l2;
@@ -535,7 +681,7 @@ inline std::vector<Line> region_notes(const Region& r, const unsigned char* base
                 out.push_back(l2);
             } else if (r.strpart == 2) {   // .len
                 Line l;
-                l.col(clr::green(), clip(f.name, 10) + ".len")
+                l.col(clr::green(), clip(f.name, std::max<std::size_t>(10, budget / 2)) + ".len")
                  .col(clr::grey(), " = ")
                  .col(clr::green(), std::to_string(f.str_len))
                  .col(clr::grey(), " — длина строки");
@@ -543,7 +689,7 @@ inline std::vector<Line> region_notes(const Region& r, const unsigned char* base
             } else if (r.strpart == 3) {   // .buf / .cap
                 if (f.sso) {
                     Line l;
-                    l.col(clr::green(), clip(f.name, 10) + ".buf")
+                    l.col(clr::green(), clip(f.name, std::max<std::size_t>(10, budget / 2)) + ".buf")
                      .col(clr::grey(), " = ")
                      .col(clr::green(), clip(f.value, budget > 20 ? budget - 20
                                                                   : 6));
@@ -553,7 +699,7 @@ inline std::vector<Line> region_notes(const Region& r, const unsigned char* base
                     out.push_back(l2);
                 } else {
                     Line l;
-                    l.col(clr::green(), clip(f.name, 10) + ".cap")
+                    l.col(clr::green(), clip(f.name, std::max<std::size_t>(10, budget / 2)) + ".cap")
                      .col(clr::grey(), " = ")
                      .col(clr::green(), std::to_string(f.str_cap))
                      .col(clr::grey(), " — вместимость");
@@ -564,7 +710,13 @@ inline std::vector<Line> region_notes(const Region& r, const unsigned char* base
                 }
             } else {                        // обычное поле
                 // Для одиночного значения hex уйдёт отдельной строкой-уроком.
-                out.push_back(field_headline(f, budget, !standalone));
+                const bool wrap_name = vwidth(f.name) > budget / 2;
+                if (wrap_name) {
+                    Line name;
+                    name.col(clr::green(), clip(f.name, budget));
+                    out.push_back(name);
+                }
+                out.push_back(field_headline(f, budget, !standalone, !wrap_name));
                 if (f.kind == FieldInfo::Kind::pointer)
                     pointer_notes(out, f, base, total, budget);
                 if (f.kind == FieldInfo::Kind::str && !f.str_layout) {
@@ -631,7 +783,8 @@ inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
     for (const Region& r : regions) {
         const auto rows  = region_rows(r.off, r.size);
         const auto notes = region_notes(r, base, total, standalone,
-                                        gutter ? GUT_TXT : FRAME_W - 8);
+                                        gutter ? geo().gut_txt
+                                               : frame_width() - 8);
         if (gutter) {
             // Строк — сколько нужно и байтам, и выноскам; недостающие рамочные
             // строки — пустые. Выноска i стоит СТРОГО напротив своей строки.
@@ -714,9 +867,9 @@ inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
                   .col(clr::cyan(), bytes)
                   .col(clr::grey(), " → ")
                   .col(clr::cyan(), f.alt);
-                if (le.w + vwidth(f.value) + 3 <= FRAME_W)
+                if (le.w + vwidth(f.value) + 3 <= frame_width())
                     le.col(clr::grey(), " = ").col(clr::green(), f.value);
-                if (le.w <= FRAME_W) put(le);
+                if (le.w <= frame_width()) put(le);
                 break;
             }
     }
@@ -844,17 +997,25 @@ inline void render_satellites(const std::vector<FieldInfo>& fields,
             continue;
         // Стрелка-связка от главной панели к спутнику.
         std::cout << ind << clr::grey() << "│" << clr::reset() << '\n';
-        std::cout << ind << clr::grey() << "╰─► " << clr::reset()
-                  << clr::green() << f.name << ".ptr" << clr::reset()
-                  << clr::grey() << " ведёт сюда — в КУЧУ (далеко от объекта @ "
-                  << clr::reset() << hexptr(addr) << clr::grey() << "):"
-                  << clr::reset() << '\n';
+        Line link;
+        link.col(clr::grey(), "╰─► ")
+            .col(clr::green(), f.name + ".ptr")
+            .col(clr::grey(), " ведёт сюда — в КУЧУ (далеко от объекта @ ")
+            .plain(hexptr(addr)).col(clr::grey(), "):");
+        const std::size_t link_budget =
+            term_width() > vwidth(ind) ? term_width() - vwidth(ind) : 1;
+        std::cout << ind
+                  << (link.w > link_budget ? clip_ansi(link.s, link_budget)
+                                           : link.s)
+                  << '\n';
 
         const std::string pre = ind + "    ";
         auto sat_line = [&](const Line& ln) {
-            const std::size_t pad = ln.w < SAT_W ? SAT_W - ln.w : 0;
+            const std::size_t body_w = std::min(ln.w, SAT_W);
+            const std::size_t pad = SAT_W - body_w;
             std::cout << pre << clr::grey() << "│" << clr::reset() << ' '
-                      << ln.s << std::string(pad, ' ') << ' '
+                      << (ln.w > SAT_W ? clip_ansi(ln.s, SAT_W) : ln.s)
+                      << std::string(pad, ' ') << ' '
                       << clr::grey() << "│" << clr::reset() << '\n';
         };
         // Верх: ╭─◈ куча @ 0x… ─╮

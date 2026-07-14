@@ -27,6 +27,7 @@
 #include <cstddef>
 #include <cstdint>       // std::uintptr_t — сравнение адресов без UB-серости
 #include <cstdio>        // std::snprintf (hex-запись целых)
+#include <cstdlib>       // std::free
 #include <cstring>       // std::memcpy, std::char_traits
 #include <memory>        // std::unique_ptr
 #include <sstream>
@@ -231,18 +232,37 @@ std::string stringify(const FT& field) {
         else
             oss << "char(" << static_cast<int>(byte) << ')';  // управляющий → код
         return oss.str();
+    } else if constexpr (std::is_pointer_v<U> &&
+                         std::is_function_v<std::remove_pointer_t<U>>) {
+        // Указатель на функцию: static_cast в void* для него ill-formed.
+        // reinterpret_cast — conditionally-supported, но работает на всех
+        // трёх наших компиляторах (GCC/Clang/MSVC).
+        std::ostringstream oss;
+        oss << reinterpret_cast<const void*>(field);
+        return oss.str();
     } else if constexpr (std::is_pointer_v<U>) {
         // Указатель (включая char*!) — как АДРЕС, а не разыменовываем: os<<(char*)
         // прочитал бы чужую память как C-строку (мусор / выход за буфер / краш).
         std::ostringstream oss;
-        oss << static_cast<const void*>(field);
+        // Сначала сохраняем volatile, затем явно снимаем его только для
+        // стандартного ostream-overload const void*. Сам адрес не читаем.
+        const volatile void* p = static_cast<const volatile void*>(field);
+        oss << const_cast<const void*>(p);
         return oss.str();
     } else if constexpr (std::is_array_v<U>) {
         // C-массив: char[N] распался бы в const char* и читался как строка за
         // границей массива (UB, ловится ASan'ом). Показываем размер; байты — ниже.
         return "[массив " + std::to_string(sizeof(U)) + " байт]";
     } else if constexpr (std::is_same_v<U, std::string>) {
-        return '"' + std::string(field) + '"';   // строку — в кавычках
+        // В кавычках и БЕЗ управляющих байтов: '\n' порвал бы рамку панели,
+        // а 0x1b (ESC) инжектил бы живую ANSI-последовательность в терминал.
+        std::string s;
+        s.reserve(field.size() + 2);
+        s += '"';
+        for (unsigned char c : field)
+            s += (c < 0x20 || c == 0x7f) ? '.' : static_cast<char>(c);
+        s += '"';
+        return s;
     } else if constexpr (printable<U>) {
         std::ostringstream oss;
         if constexpr (std::is_same_v<U, bool>) oss << std::boolalpha;
@@ -296,11 +316,11 @@ void annotate(FieldInfo& fi, const FT& field) {
     } else if constexpr (std::is_pointer_v<U> &&
                          !std::is_function_v<std::remove_pointer_t<U>>) {
         fi.kind   = FieldInfo::Kind::pointer;
-        fi.target = static_cast<const void*>(field);
-        using P = std::remove_cv_t<std::remove_pointer_t<U>>;
-        if constexpr (std::is_arithmetic_v<P>)
-            if (field != nullptr)                 // что лежит на том конце
-                fi.pointee = stringify<P>(*field);
+        const volatile void* p = static_cast<const volatile void*>(field);
+        fi.target = const_cast<const void*>(p);
+        // Произвольный сырой указатель нельзя безопасно проверить перед
+        // разыменованием: он может быть висячим, но всё ещё ненулевым. Поэтому
+        // инспектор показывает адрес, однако чужую память сам не читает.
     }
 }
 

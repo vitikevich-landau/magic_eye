@@ -43,3 +43,11 @@ foreach(ex 01_basics 02_creatures 03_tavern_vtable 04_guild_registry 05_deep_gaz
     add_executable(ex${ex} final/examples/${ex}.cpp)
     target_link_libraries(ex${ex} PRIVATE magic_eye)
 endforeach()
+
+# --- регрессии финального инспектора -----------------------------------------
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(magic_eye_tests tests/magic_eye_tests.cpp)
+    target_link_libraries(magic_eye_tests PRIVATE magic_eye)
+    add_test(NAME magic_eye_tests COMMAND magic_eye_tests)
+endif()
