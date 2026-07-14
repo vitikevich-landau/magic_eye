@@ -5,6 +5,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -42,6 +43,17 @@ std::string render_at(std::size_t width, const std::string& label) {
     return out.str();
 }
 
+std::string render_vector_at(std::size_t width) {
+    set_env("EYE_WIDTH", std::to_string(width).c_str());
+    std::vector<int> values{1, 2, 3333};
+    values.reserve(6);  // end и capacity_end различаются — проверяем оба слота
+    std::ostringstream out;
+    std::streambuf* old = std::cout.rdbuf(out.rdbuf());
+    eye::inspect(values, "vector regression");
+    std::cout.rdbuf(old);
+    return out.str();
+}
+
 bool lines_fit(const std::string& text, std::size_t width) {
     std::istringstream in(text);
     std::string line;
@@ -68,6 +80,9 @@ int main() {
     for (const std::size_t width : {64u, 80u, 110u, 118u, 126u})
         ok &= expect(lines_fit(render_at(width, "обычная подпись"), width),
                      "rendered line exceeds terminal width");
+    for (const std::size_t width : {64u, 80u, 110u, 118u, 126u})
+        ok &= expect(lines_fit(render_vector_at(width), width),
+                     "vector rendering exceeds terminal width");
 
     const std::string wide = render_at(126, "обычная подпись");
     ok &= expect(wide.find("this_is_a_deliberately_long_field_name") !=
@@ -91,6 +106,46 @@ int main() {
     ok &= expect(wide.find("◄ диапазон байт  ► наружу  ↩ внутрь  × nullptr") !=
                      std::string::npos,
                  "connection legend is missing");
+
+    const std::string vector = render_vector_at(126);
+    ok &= expect(vector.find("адаптер std::vector") != std::string::npos &&
+                     vector.find("vector: size 3 · capacity 6") !=
+                         std::string::npos,
+                 "vector public facts are missing");
+    ok &= expect(vector.find("≈ data()/begin") != std::string::npos &&
+                     vector.find("≈ end = data + size") != std::string::npos &&
+                     vector.find("≈ capacity_end") != std::string::npos,
+                 "vector address slots were not correlated");
+    ok &= expect(vector.find("vector.data() ведёт во внешний массив") !=
+                     std::string::npos &&
+                     vector.find("#2 +0x0008") != std::string::npos &&
+                     vector.find("3333") != std::string::npos,
+                 "vector heap satellite is incomplete");
+
+    std::vector<int> empty_vector;
+    std::vector<int> reserved_vector;
+    reserved_vector.reserve(4);
+    std::vector<bool> packed_bits{true, false, true};
+    std::ostringstream vector_edges;
+    std::streambuf* vector_old = std::cout.rdbuf(vector_edges.rdbuf());
+    eye::inspect(empty_vector, "empty vector");
+    eye::inspect(reserved_vector, "reserved vector");
+    eye::inspect(packed_bits, "vector bool");
+    std::cout.rdbuf(vector_old);
+    ok &= expect(vector_edges.str().find("внешнего массива нет: vector пуст") !=
+                     std::string::npos,
+                 "empty vector explanation is missing");
+    ok &= expect(vector_edges.str().find(
+                     "элементов нет; память только зарезервирована") !=
+                     std::string::npos,
+                 "reserved but empty vector is not handled");
+    ok &= expect(vector_edges.str().find(
+                     "vector<bool>: биты упакованы; data() недоступен") !=
+                     std::string::npos &&
+                     vector_edges.str().find(
+                         "элементы через operator[]: [true, false, true]") !=
+                         std::string::npos,
+                 "vector<bool> specialization is not handled");
 
     const std::string hostile = render_at(126, "строка\n\033[31mслом рамки");
     ok &= expect(hostile.find('\033') == std::string::npos,

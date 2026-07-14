@@ -469,7 +469,7 @@ inline bool has_automatic_name(const FieldInfo& f) {
 // В авторазборе имя уже выглядит как #0, #1, ... — второй номер только мешал
 // бы. Настоящие имена получают #1, #2, ... и совпадают с панелью-спутником.
 inline std::string field_mark(const FieldInfo& f, std::size_t no) {
-    return has_automatic_name(f) ? "" : field_mark(no);
+    return has_automatic_name(f) || f.inferred ? "" : field_mark(no);
 }
 
 inline void add_field_mark(Line& l, const FieldInfo& f, std::size_t no) {
@@ -507,7 +507,8 @@ inline const char* region_color(const Region& r) {
 // получает СВОИ строки и СВОЮ выноску (иначе подписи съезжают с байтов).
 inline std::vector<Region> build_regions(const std::vector<FieldInfo>& fields,
                                          std::size_t total, bool poly,
-                                         bool opaque) {
+                                         bool opaque,
+                                         const std::string& opaque_why = "") {
     std::vector<Region> rs;
     std::size_t cursor = 0;
 
@@ -518,9 +519,12 @@ inline std::vector<Region> build_regions(const std::vector<FieldInfo>& fields,
     for (std::size_t i = 0; i < fields.size(); ++i) {
         const FieldInfo& f = fields[i];
         if (f.offset > cursor && f.offset <= total) {   // дыра перед полем
-            Region p{Region::R::padding, cursor, f.offset - cursor};
-            p.why = clip(f.name, 12) + " требует адрес, кратный " +
-                    std::to_string(f.align);
+            Region p{opaque ? Region::R::opaque : Region::R::padding,
+                     cursor, f.offset - cursor};
+            p.why = opaque ? opaque_why
+                           : clip(f.name, 12) +
+                                 " требует адрес, кратный " +
+                                 std::to_string(f.align);
             rs.push_back(p);
         }
         const bool shade = i % 2 != 0;
@@ -536,8 +540,11 @@ inline std::vector<Region> build_regions(const std::vector<FieldInfo>& fields,
         }
         if (f.offset + f.size > cursor) cursor = f.offset + f.size;
     }
-    if (opaque && cursor < total)
-        rs.push_back({Region::R::opaque, cursor, total - cursor});
+    if (opaque && cursor < total) {
+        Region hidden{Region::R::opaque, cursor, total - cursor};
+        hidden.why = opaque_why;
+        rs.push_back(hidden);
+    }
     else if (cursor < total) {
         Region p{Region::R::padding, cursor, total - cursor};
         p.why = "добивка sizeof до кратного выравниванию";
@@ -701,9 +708,15 @@ inline std::vector<Line> region_notes(const Region& r, const unsigned char* base
             break;
         }
         case Region::R::opaque: {
-            Line l1; l1.col(clr::grey(), "поля скрыты: private/конструкторы");
+            Line l1;
+            l1.col(clr::grey(), r.why.empty()
+                                    ? "поля скрыты: private/конструкторы"
+                                    : "служебная часть std::vector");
             Line l2 = range_note(r);
-            Line l3; l3.col(clr::grey(), "добавь EYE_DESCRIBE — Око увидит");
+            Line l3;
+            l3.col(clr::grey(), r.why.empty()
+                                    ? "добавь EYE_DESCRIBE — Око увидит"
+                                    : clip(r.why, budget));
             out = {l1, l2, l3};
             break;
         }
@@ -823,7 +836,8 @@ inline Line gut_connector(std::size_t i, std::size_t k, bool has_text) {
 // ---- Сама секция «память» ---------------------------------------------------
 inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
                           std::size_t talign, bool poly, const void* addr,
-                          bool opaque, bool standalone) {
+                          bool opaque, bool standalone,
+                          const VectorInfo* vector = nullptr) {
     const auto* base = static_cast<const unsigned char*>(addr);
     // Реестр мог перечислить поля не по порядку — сортируем по offset, иначе
     // регионы и padding посчитаются неверно.
@@ -831,7 +845,10 @@ inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
               [](const FieldInfo& a, const FieldInfo& b) {
                   return a.offset < b.offset;
               });
-    const auto regions = build_regions(fields, total, poly, opaque);
+    const std::string opaque_why = vector == nullptr
+        ? ""
+        : "роль зависит от STL и режима Debug/Release";
+    const auto regions = build_regions(fields, total, poly, opaque, opaque_why);
     const bool gutter = geo().gutter;
 
     bool has_pad = false, has_vptr = false, has_field = false, has_op = false;
@@ -873,6 +890,55 @@ inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
         overview.col(clr::grey(), " (" + std::to_string(pct) + "%)");
     }
     put(overview);
+
+    if (vector != nullptr) {
+        Line facts;
+        facts.col(clr::grey(), "vector: size ")
+             .col(clr::green(), std::to_string(vector->size))
+             .col(clr::grey(), " · capacity ")
+             .col(clr::green(), std::to_string(vector->capacity))
+             .col(clr::grey(), " · элемент ")
+             .col(clr::cyan(), vector->element_type);
+        if (vector->bit_packed)
+            facts.col(clr::grey(), " (1 бит логически)");
+        else
+            facts.col(clr::grey(), " (" +
+                      std::to_string(vector->element_size) + " Б)");
+        put(facts);
+
+        Line storage;
+        if (vector->bit_packed) {
+            storage.col(clr::gold(), "vector<bool>: биты упакованы; data() недоступен");
+        } else if (vector->data == nullptr) {
+            storage.col(clr::grey(), "внешнего массива нет: vector пуст");
+        } else {
+            storage.col(clr::grey(), "куча: живые элементы ")
+                   .col(clr::green(), std::to_string(vector->heap_used) + " Б")
+                   .col(clr::grey(), " · резерв ")
+                   .col(clr::green(),
+                        std::to_string(vector->heap_reserved) + " Б")
+                   .col(clr::grey(), " · data @ ")
+                   .plain(hexptr(vector->data));
+        }
+        put(storage);
+
+        if (vector->bit_packed && !vector->elements.empty()) {
+            Line values;
+            values.col(clr::grey(), "элементы через operator[]: [");
+            for (std::size_t i = 0; i < vector->elements.size(); ++i) {
+                if (i != 0) values.col(clr::grey(), ", ");
+                values.col(clr::green(), vector->elements[i].value);
+            }
+            if (vector->size > vector->elements.size())
+                values.col(clr::grey(), ", …");
+            values.col(clr::grey(), "]");
+            put(values);
+        }
+
+        if (!vector->bit_packed && vector->data != nullptr &&
+            !vector->slots_matched)
+            put_text("≈ адресные слоты не распознаны — не называем их наугад");
+    }
 
     // Шапка-линейка: подписи колонок стоят РОВНО над своими данными.
     Line h;
@@ -933,7 +999,13 @@ inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
     if (!trivial || has_links) put_blank();
     if (!trivial) {
         Line leg;
-        if (has_field) leg.col(clr::cyan(), "█▓").col(clr::grey(), " поля (сосед — другой тон)  ");
+        if (has_field) {
+            leg.col(clr::cyan(), "█▓");
+            if (vector != nullptr)
+                leg.col(clr::grey(), " адресные слова (≈ сопоставление)  ");
+            else
+                leg.col(clr::grey(), " поля (сосед — другой тон)  ");
+        }
         if (has_pad)   leg.col(clr::red(), "░").col(clr::grey(), " padding  ");
         if (has_vptr)  leg.col(clr::violet(), "▒").col(clr::grey(), " vptr  ");
         if (has_op)    leg.col(clr::grey(), "▓ скрытое");
@@ -1077,8 +1149,8 @@ inline void render_vtable(const VtableInfo& vi, std::size_t obj_size) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  Панели-спутники: буферы std::string, живущие в куче. Печатаются ПОСЛЕ
-//  главной панели — куча и правда живёт «где-то ещё», не внутри объекта.
+//  Панели-спутники: буферы std::string и массивы std::vector, живущие в куче.
+//  Печатаются ПОСЛЕ главной панели — внешняя память правда «где-то ещё».
 // ════════════════════════════════════════════════════════════════════════════
 inline void render_satellites(const std::vector<FieldInfo>& fields,
                               const void* addr) {
@@ -1164,6 +1236,93 @@ inline void render_satellites(const std::vector<FieldInfo>& fields,
         std::cout << pre << clr::grey() << "╰" << dashes(SAT_W + 2) << "╯"
                   << clr::reset() << '\n';
     }
+}
+
+// Внешний непрерывный массив std::vector. Показываем только ЖИВЫЕ элементы;
+// зарезервированный, но не сконструированный хвост не читаем.
+inline void render_vector_satellite(const VectorInfo& vector,
+                                    const void* addr) {
+    if (vector.bit_packed || vector.data == nullptr || vector.capacity == 0)
+        return;
+
+    constexpr std::size_t SAT_W = 52;
+    const std::string ind = margin_str() + "   ";
+    std::cout << ind << clr::grey() << "│" << clr::reset() << '\n';
+
+    Line link;
+    link.col(clr::gold(), "╰──► ")
+        .col(clr::green(), "vector.data()")
+        .col(clr::grey(), " ведёт во внешний массив; объект остался @ ")
+        .plain(hexptr(addr)).col(clr::grey(), ":");
+    const std::size_t link_budget =
+        term_width() > vwidth(ind) ? term_width() - vwidth(ind) : 1;
+    std::cout << ind
+              << (link.w > link_budget ? clip_ansi(link.s, link_budget)
+                                       : link.s)
+              << '\n';
+
+    const std::string pre = ind + "    ";
+    auto sat_line = [&](const Line& ln) {
+        const std::size_t body_w = std::min(ln.w, SAT_W);
+        const std::size_t pad = SAT_W - body_w;
+        std::cout << pre << clr::grey() << "│" << clr::reset() << ' '
+                  << (ln.w > SAT_W ? clip_ansi(ln.s, SAT_W) : ln.s)
+                  << std::string(pad, ' ') << ' '
+                  << clr::grey() << "│" << clr::reset() << '\n';
+    };
+
+    {
+        const std::string title = clip(
+            "внешний массив @ " + hexptr(vector.data) + " · " +
+                vector.element_type + "[]",
+            SAT_W - 3);
+        std::cout << pre << clr::grey() << "╭─" << clr::violet() << "◈ "
+                  << clr::reset() << clr::gold() << title << clr::reset()
+                  << ' ' << clr::grey()
+                  << dashes(SAT_W - vwidth(title) - 2) << "╮"
+                  << clr::reset() << '\n';
+    }
+    {
+        Line info;
+        info.col(clr::grey(), "size ")
+            .col(clr::green(), std::to_string(vector.size))
+            .col(clr::grey(), " · capacity ")
+            .col(clr::green(), std::to_string(vector.capacity))
+            .col(clr::grey(), " · живые ")
+            .col(clr::green(), std::to_string(vector.heap_used) + " Б")
+            .col(clr::grey(), " / резерв ")
+            .col(clr::green(), std::to_string(vector.heap_reserved) + " Б");
+        sat_line(info);
+    }
+
+    if (vector.elements.empty()) {
+        Line empty;
+        empty.col(clr::grey(), "элементов нет; память только зарезервирована");
+        sat_line(empty);
+    }
+    for (const VectorElementInfo& element : vector.elements) {
+        std::string bytes;
+        for (unsigned char byte : element.bytes)
+            bytes += hex2(byte) + " ";
+        if (element.bytes.size() < vector.element_size) bytes += "… ";
+
+        Line row;
+        row.col(clr::gold(), "#" + std::to_string(element.index)).sp()
+           .col(clr::grey(), "+" + hex4(element.index * vector.element_size))
+           .sp().col(clr::cyan(), ljust(bytes, 25))
+           .col(clr::grey(), "= ")
+           .col(clr::green(), element.value);
+        sat_line(row);
+    }
+    if (vector.size > vector.elements.size()) {
+        Line more;
+        more.col(clr::grey(), "⋯ ещё " +
+                 std::to_string(vector.size - vector.elements.size()) +
+                 " элементов ⋯");
+        sat_line(more);
+    }
+    std::cout << pre << clr::grey() << "╰" << dashes(SAT_W + 2) << "╯"
+              << clr::reset() << '\n';
 }
 
 } // namespace detail

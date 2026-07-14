@@ -14,6 +14,7 @@
 //     * класс с EYE_DESCRIBE  → + ИМЕНА полей, включая private
 //     * полиморфный класс     → + регион vptr и блок-диаграмма vtable
 //     * std::string           → SSO против кучи; кучный буфер — панель-спутник
+//     * std::vector           → адресные слова + внешний массив элементов
 //
 //   Вид управляется переменными окружения:
 //     EYE_WIDTH=N   — считать терминал N колонок (иначе определяем сами);
@@ -65,11 +66,13 @@ void inspect(const T& obj, const std::string& label = "") {
     d::frame_sep("паспорт");
     d::render_passport(d::passport_of<T>());
 
-    // --- схема памяти: реестр > std::string > автоматика > честное «скрыто» ---
+    // --- схема памяти: реестр > адаптеры std > автоматика > честное «скрыто» --
     std::vector<d::FieldInfo> fields;
+    d::VectorInfo vector;
     std::string src;            // откуда взялись имена — приписка к заголовку
     bool opaque = false;        // содержимое скрыто (нет способа разобрать)
     bool standalone = false;    // объект = одно значение (скаляр, строка)
+    bool vector_mode = false;
 
     if constexpr (d::described<T>) {
         fields = d::collect(obj);
@@ -77,6 +80,12 @@ void inspect(const T& obj, const std::string& label = "") {
     } else if constexpr (std::is_same_v<T, std::string>) {
         fields.push_back(d::self_field(obj));
         standalone = true;
+    } else if constexpr (d::is_std_vector_v<T>) {
+        vector = d::vector_info(obj);
+        fields = vector.slots;
+        opaque = true;          // нераспознанные слова остаются честно скрытыми
+        vector_mode = true;
+        src = " · адаптер std::vector";
     } else if constexpr (std::is_class_v<T> && std::is_aggregate_v<T>) {
         if constexpr (d::field_count<T>() <= 8) {
             fields = d::collect(obj);
@@ -93,7 +102,8 @@ void inspect(const T& obj, const std::string& label = "") {
 
     d::frame_sep("память · объект @ " + d::hexptr(&obj) + src);
     d::render_memory(fields, sizeof(T), alignof(T), std::is_polymorphic_v<T>,
-                     &obj, opaque, standalone);
+                     &obj, opaque, standalone,
+                     vector_mode ? &vector : nullptr);
 
     // --- vtable для полиморфных ------------------------------------------------
     if constexpr (std::is_polymorphic_v<T>) {
@@ -105,6 +115,7 @@ void inspect(const T& obj, const std::string& label = "") {
 
     // --- спутники: буферы строк, живущие в куче (НЕ внутри объекта) ------------
     d::render_satellites(fields, &obj);
+    if (vector_mode) d::render_vector_satellite(vector, &obj);
     std::cout << '\n';
 }
 

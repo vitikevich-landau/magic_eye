@@ -152,6 +152,15 @@ concept described = requires { T::eye_describe(); };
 template <class T>
 concept auto_inspectable = std::is_aggregate_v<T> && !described<T>;
 
+// Специализации стандартных типов идут отдельными адаптерами: их private-поля
+// недоступны, зато публичный API даёт достаточно фактов для честной схемы.
+template <class T> struct is_std_vector_impl : std::false_type {};
+template <class E, class A>
+struct is_std_vector_impl<std::vector<E, A>> : std::true_type {};
+template <class T>
+inline constexpr bool is_std_vector_v =
+    is_std_vector_impl<std::remove_cvref_t<T>>::value;
+
 // ════════════════════════════════════════════════════════════════════════════
 //  Структуры данных модели (их рисует eye/render.hpp)
 // ════════════════════════════════════════════════════════════════════════════
@@ -162,6 +171,7 @@ struct FieldInfo {
     std::size_t align  = 1;  // alignof поля — объясняет дыры ПЕРЕД ним
     std::string type;
     std::string value;       // уже отформатированное значение (см. stringify)
+    bool inferred = false;   // не private-поле, а совпавший адресный слот ABI
 
     // --- аннотации для вида (заполняет annotate) ----------------------------
     enum class Kind { plain, pointer, str };
@@ -196,6 +206,29 @@ struct VtableInfo {      // то, что удалось узнать про по
     bool           itanium = false;       // доступны ли сырые ячейки?
     std::ptrdiff_t offset_to_top = 0;     // vtable[-2] (только Itanium)
     const void*    slot0 = nullptr;       // vtable[0]  (только Itanium)
+};
+
+struct VectorElementInfo {
+    std::size_t index = 0;
+    std::string value;
+    std::vector<unsigned char> bytes;  // первые байты живого элемента
+};
+
+// Семантический адаптер std::vector. size/capacity/data и элементы — точные
+// факты публичного API. slots — осторожная корреляция этих адресов с сырыми
+// словами самого объекта; она помечается знаком ≈ и не выдаётся за стандарт ABI.
+struct VectorInfo {
+    std::string element_type;
+    std::size_t size = 0;
+    std::size_t capacity = 0;
+    std::size_t element_size = 0;
+    std::size_t heap_used = 0;
+    std::size_t heap_reserved = 0;
+    const void* data = nullptr;
+    bool bit_packed = false;       // std::vector<bool>: data() намеренно нет
+    bool slots_matched = false;
+    std::vector<FieldInfo> slots;
+    std::vector<VectorElementInfo> elements;
 };
 
 // Одна запись реестра EYE_DESCRIBE: имя поля + указатель-на-член.
@@ -321,6 +354,98 @@ void annotate(FieldInfo& fi, const FT& field) {
         // Произвольный сырой указатель нельзя безопасно проверить перед
         // разыменованием: он может быть висячим, но всё ещё ненулевым. Поэтому
         // инспектор показывает адрес, однако чужую память сам не читает.
+    }
+}
+
+// std::vector: получаем точную семантику через public API, а затем ищем внутри
+// объекта последовательность трёх машинных слов {data, end, capacity_end}.
+// Поиск, а не жёсткие offset'ы, переживает разницу GCC/MSVC и Debug/Release.
+template <class E, class A>
+VectorInfo vector_info(const std::vector<E, A>& v) {
+    VectorInfo info;
+    info.element_type = type_name<E>();
+    info.size = v.size();
+    info.capacity = v.capacity();
+    info.element_size = sizeof(E);
+    info.bit_packed = std::is_same_v<E, bool>;
+
+    const std::size_t preview = std::min<std::size_t>(v.size(), 8);
+    info.elements.reserve(preview);
+    for (std::size_t i = 0; i < preview; ++i) {
+        VectorElementInfo element;
+        element.index = i;
+        if constexpr (std::is_same_v<E, bool>) {
+            const bool value = v[i];
+            element.value = stringify(value);
+        } else {
+            const E& value = v[i];
+            element.value = stringify(value);
+            const auto* bytes = reinterpret_cast<const unsigned char*>(
+                std::addressof(value));
+            const std::size_t n = std::min<std::size_t>(sizeof(E), 8);
+            element.bytes.assign(bytes, bytes + n);
+        }
+        info.elements.push_back(std::move(element));
+    }
+
+    if constexpr (std::is_same_v<E, bool>) {
+        // vector<bool> хранит упакованные биты и не предоставляет data().
+        return info;
+    } else {
+        info.data = static_cast<const void*>(v.data());
+        info.heap_used = v.size() * sizeof(E);
+        info.heap_reserved = v.capacity() * sizeof(E);
+
+        if (info.data == nullptr || sizeof(v) < 3 * sizeof(void*)) return info;
+
+        const auto begin = reinterpret_cast<std::uintptr_t>(info.data);
+        const auto end = begin + info.heap_used;
+        const auto capacity_end = begin + info.heap_reserved;
+        const auto* object = reinterpret_cast<const unsigned char*>(
+            std::addressof(v));
+
+        std::size_t match = sizeof(v);
+        for (std::size_t off = 0; off + 3 * sizeof(void*) <= sizeof(v);
+             off += alignof(void*)) {
+            std::uintptr_t words[3]{};
+            for (std::size_t i = 0; i < 3; ++i)
+                std::memcpy(&words[i], object + off + i * sizeof(void*),
+                            sizeof(void*));
+            if (words[0] == begin && words[1] == end &&
+                words[2] == capacity_end) {
+                match = off;
+                break;
+            }
+        }
+        if (match == sizeof(v)) return info;
+
+        auto add_slot = [&](std::size_t off, std::string name,
+                            std::string type, std::uintptr_t value,
+                            FieldInfo::Kind kind = FieldInfo::Kind::plain) {
+            FieldInfo field;
+            field.name = std::move(name);
+            field.offset = off;
+            field.size = sizeof(void*);
+            field.align = alignof(void*);
+            field.type = std::move(type);
+            field.value = stringify(reinterpret_cast<const void*>(value));
+            field.inferred = true;
+            field.kind = kind;
+            if (kind == FieldInfo::Kind::pointer) {
+                field.target = info.data;
+                if (!info.elements.empty())
+                    field.pointee = "#0 = " + info.elements.front().value;
+            }
+            info.slots.push_back(std::move(field));
+        };
+
+        add_slot(match, "≈ data()/begin", info.element_type + " *", begin,
+                 FieldInfo::Kind::pointer);
+        add_slot(match + sizeof(void*), "≈ end = data + size", "граница", end);
+        add_slot(match + 2 * sizeof(void*), "≈ capacity_end", "граница",
+                 capacity_end);
+        info.slots_matched = true;
+        return info;
     }
 }
 
