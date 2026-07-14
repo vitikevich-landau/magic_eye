@@ -22,8 +22,11 @@
 #  define EYE_ITANIUM_ABI 0   // MSVC: своя объектная модель, деманглер не нужен
 #endif
 
+#include <algorithm>     // std::min (превью кучи)
 #include <cctype>
 #include <cstddef>
+#include <cstdint>       // std::uintptr_t — сравнение адресов без UB-серости
+#include <cstdio>        // std::snprintf (hex-запись целых)
 #include <cstring>       // std::memcpy, std::char_traits
 #include <memory>        // std::unique_ptr
 #include <sstream>
@@ -152,11 +155,30 @@ concept auto_inspectable = std::is_aggregate_v<T> && !described<T>;
 //  Структуры данных модели (их рисует eye/render.hpp)
 // ════════════════════════════════════════════════════════════════════════════
 struct FieldInfo {
-    std::string name;    // "#0" в M2-режиме; настоящее имя из реестра
-    std::size_t offset;
-    std::size_t size;
+    std::string name;        // "#0" в M2-режиме; настоящее имя из реестра
+    std::size_t offset = 0;
+    std::size_t size   = 0;
+    std::size_t align  = 1;  // alignof поля — объясняет дыры ПЕРЕД ним
     std::string type;
-    std::string value;   // уже отформатированное значение (см. stringify)
+    std::string value;       // уже отформатированное значение (см. stringify)
+
+    // --- аннотации для вида (заполняет annotate) ----------------------------
+    enum class Kind { plain, pointer, str };
+    Kind kind = Kind::plain;
+
+    bool        integral = false;  // целое → вид покажет hex и little-endian
+    std::string alt;               // альтернативная запись значения (hex)
+
+    // kind == pointer | str: куда смотрит (значение указателя / data() строки)
+    const void* target = nullptr;
+    std::string pointee;           // что лежит по адресу (скалярный pointee)
+
+    // kind == str:
+    bool        sso = false;       // буфер внутри объекта (SSO), не в куче
+    std::size_t str_len = 0;
+    std::size_t str_cap = 0;
+    bool        str_layout = false;         // раскладка ptr/len/buf известна
+    std::vector<unsigned char> heap_bytes;  // превью буфера из кучи (спутник)
 };
 
 struct Passport {        // ответы компилятора о типе (M0)
@@ -219,6 +241,8 @@ std::string stringify(const FT& field) {
         // C-массив: char[N] распался бы в const char* и читался как строка за
         // границей массива (UB, ловится ASan'ом). Показываем размер; байты — ниже.
         return "[массив " + std::to_string(sizeof(U)) + " байт]";
+    } else if constexpr (std::is_same_v<U, std::string>) {
+        return '"' + std::string(field) + '"';   // строку — в кавычках
     } else if constexpr (printable<U>) {
         std::ostringstream oss;
         if constexpr (std::is_same_v<U, bool>) oss << std::boolalpha;
@@ -226,6 +250,57 @@ std::string stringify(const FT& field) {
         return oss.str();
     } else {
         return "—";  // непечатаемый тип (вложенная структура и т.п.) — честно
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Аннотации поля: семантика, которую вид превратит в выноски и стрелки.
+//  Всё вычисляется здесь, в модели, в момент осмотра (пока объект жив).
+// ════════════════════════════════════════════════════════════════════════════
+template <class FT>
+void annotate(FieldInfo& fi, const FT& field) {
+    using U = std::remove_cvref_t<FT>;
+    fi.align = alignof(U);
+
+    if constexpr (std::is_integral_v<U> && !std::is_same_v<U, bool> &&
+                  sizeof(U) > 1) {
+        // Целое шире байта: рядом с десятичным значением пригодится hex —
+        // по нему видно little-endian в дампе (младший байт лежит первым).
+        fi.integral = true;
+        char b[24];
+        unsigned long long v = 0;
+        std::memcpy(&v, &field, sizeof(field));   // без знаковых сюрпризов
+        std::snprintf(b, sizeof(b), "0x%0*llx", static_cast<int>(sizeof(U) * 2), v);
+        fi.alt = b;
+    } else if constexpr (std::is_same_v<U, std::string>) {
+        fi.kind    = FieldInfo::Kind::str;
+        fi.target  = field.data();
+        fi.str_len = field.size();
+        fi.str_cap = field.capacity();
+        // SSO: буфер лежит ВНУТРИ футпринта самой строки? Сравниваем адреса
+        // как числа — сравнение «сырых» указателей из разных блоков не для if.
+        const auto fb = reinterpret_cast<std::uintptr_t>(&field);
+        const auto db = reinterpret_cast<std::uintptr_t>(field.data());
+        fi.sso = db >= fb && db < fb + sizeof(field);
+#if defined(__GLIBCXX__)
+        // libstdc++: знакомая раскладка {ptr, len, union{buf16|cap}} —
+        // вид сможет подписать под-регионы поля.
+        fi.str_layout = true;
+#endif
+        if (!fi.sso && field.data() != nullptr) {
+            // Буфер в куче: снимем превью для панели-спутника (+1 — '\0').
+            const auto* p = reinterpret_cast<const unsigned char*>(field.data());
+            const std::size_t n = std::min<std::size_t>(field.size() + 1, 48);
+            fi.heap_bytes.assign(p, p + n);
+        }
+    } else if constexpr (std::is_pointer_v<U> &&
+                         !std::is_function_v<std::remove_pointer_t<U>>) {
+        fi.kind   = FieldInfo::Kind::pointer;
+        fi.target = static_cast<const void*>(field);
+        using P = std::remove_cv_t<std::remove_pointer_t<U>>;
+        if constexpr (std::is_arithmetic_v<P>)
+            if (field != nullptr)                 // что лежит на том конце
+                fi.pointee = stringify<P>(*field);
     }
 }
 
@@ -250,12 +325,16 @@ std::vector<FieldInfo> collect(const T& obj) {
             (..., [&](auto e) {
                 const auto& field = obj.*(e.ptr);
                 using FT = std::remove_cvref_t<decltype(field)>;
-                fields.push_back(FieldInfo{
-                    e.name,
-                    static_cast<std::size_t>(
-                        reinterpret_cast<const unsigned char*>(
-                            std::addressof(field)) - base),
-                    sizeof(field), type_name<FT>(), stringify<FT>(field)});
+                FieldInfo fi;
+                fi.name   = e.name;
+                fi.offset = static_cast<std::size_t>(
+                    reinterpret_cast<const unsigned char*>(
+                        std::addressof(field)) - base);
+                fi.size  = sizeof(field);
+                fi.type  = type_name<FT>();
+                fi.value = stringify<FT>(field);
+                annotate<FT>(fi, field);
+                fields.push_back(std::move(fi));
             }(entry));
         },
         T::eye_describe());
@@ -270,14 +349,33 @@ std::vector<FieldInfo> collect(const T& obj) {
     std::size_t idx = 0;
     visit_fields(obj, [&](const auto& field) {
         using FT = std::remove_cvref_t<decltype(field)>;
-        fields.push_back(FieldInfo{
-            "#" + std::to_string(idx++),
-            static_cast<std::size_t>(
-                reinterpret_cast<const unsigned char*>(std::addressof(field)) -
-                base),
-            sizeof(field), type_name<FT>(), stringify<FT>(field)});
+        FieldInfo fi;
+        fi.name   = "#" + std::to_string(idx++);
+        fi.offset = static_cast<std::size_t>(
+            reinterpret_cast<const unsigned char*>(std::addressof(field)) -
+            base);
+        fi.size  = sizeof(field);
+        fi.type  = type_name<FT>();
+        fi.value = stringify<FT>(field);
+        annotate<FT>(fi, field);
+        fields.push_back(std::move(fi));
     });
     return fields;
+}
+
+// Весь объект как ОДНО «поле» — для скаляров, указателей и std::string,
+// у которых нет разбираемых полей, но схема памяти всё равно нужна.
+template <class T>
+FieldInfo self_field(const T& obj) {
+    FieldInfo fi;
+    fi.name   = std::is_same_v<std::remove_cvref_t<T>, std::string>
+                    ? "строка" : "значение";
+    fi.offset = 0;
+    fi.size   = sizeof(T);
+    fi.type   = type_name<T>();
+    fi.value  = stringify<T>(obj);
+    annotate<T>(fi, obj);
+    return fi;
 }
 
 // Разбор vtable (M3). vptr и динамический тип — портируемо (обе ABI); сырые

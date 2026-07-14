@@ -1,33 +1,45 @@
 // ============================================================================
-//   ОКО МАГА / eye/render.hpp — ВИД: тема «Гримуар» (рамки + цвет)
+//   ОКО МАГА / eye/render.hpp — ВИД: тема «Гримуар v2» (схема памяти + выноски)
 // ============================================================================
-//   Берёт факты из eye/reflect.hpp и рисует их рамочными панелями в консоли.
-//   Здесь вся эстетика: ANSI-цвета, box-drawing, раскладка, обрезка длинного.
-//   Хочешь другой внешний вид — меняешь только этот файл, модель не трогаешь.
+//   Берёт факты из eye/reflect.hpp и рисует их в консоли. Здесь вся эстетика:
+//   ANSI-цвета, box-drawing, раскладка, обрезка длинного. Хочешь другой
+//   внешний вид — меняешь только этот файл, модель не трогаешь.
+//
+//   Что нового против v1:
+//     * панель центрируется по ширине терминала (EYE_CENTER=0 — прижать влево);
+//     * СХЕМА ПАМЯТИ: секции «поля» + «карта» + «байты» слиты в одну
+//       вертикальную схему — регион (vptr / поле / padding) = блок строк:
+//       offset, цветной «кирпич», hex-байты, ascii; байт со смещением N
+//       стоит в колонке N%8 — выравнивание видно глазами;
+//     * боковые ВЫНОСКИ справа от рамки, как на блок-схемах (◄── и ◄┬─/├─/╰─);
+//       в узком терминале переезжают внутрь рамки (компактный режим);
+//     * std::string: SSO против кучи; на libstdc++ поле разбирается на
+//       .ptr / .len / .buf; кучный буфер — отдельная панель-«спутник»;
+//     * vtable — блок-диаграмма: объект → vptr → vtable → слот → код.
 //
 //   Как рамка сходится справа, несмотря на цвета и кириллицу: каждую строку
 //   собираем через Line, отдельно считая ВИДИМУЮ ширину (ANSI-коды = 0 колонок,
-//   один символ UTF-8 = 1 колонка). Переменные куски (имя/тип/значение/заголовок)
-//   заранее обрезаем до ширины колонок функцией clip(). Тогда правый борт всегда
-//   на одном месте.
+//   один символ UTF-8 = 1 колонка). Переменные куски заранее обрезаем clip().
 // ============================================================================
 #pragma once
 #include "reflect.hpp"
 
-// --- Платформа: isatty + включение ANSI-консоли ------------------------------
+// --- Платформа: isatty + ANSI-консоль + ширина терминала ---------------------
 #if defined(_WIN32)
 #  define NOMINMAX             // чтобы windows.h не переопределил std::min/max
 #  define WIN32_LEAN_AND_MEAN
 #  include <io.h>             // _isatty, _fileno
-#  include <windows.h>        // кодовая страница + ANSI (VT) в консоли
+#  include <windows.h>        // кодовая страница, ANSI (VT), ширина консоли
 #else
+#  include <sys/ioctl.h>      // TIOCGWINSZ — ширина терминала
 #  include <unistd.h>         // isatty, fileno — POSIX
 #endif
 
-#include <algorithm>  // std::sort, std::min
+#include <algorithm>  // std::sort, std::min, std::max
 #include <cctype>     // std::isprint
 #include <cstddef>
 #include <cstdio>     // std::snprintf
+#include <cstdlib>    // std::getenv, std::atoi
 #include <iostream>
 #include <sstream>    // std::ostringstream (hexptr)
 #include <string>
@@ -37,10 +49,26 @@ namespace eye {
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Палитра (M0). ANSI-коды; при выводе не в терминал отключаются сами.
+//  EYE_COLOR=1 — форсировать цвета (redirect в файл, CI), EYE_COLOR=0 — убрать.
 // ════════════════════════════════════════════════════════════════════════════
 namespace clr {
 inline bool enabled() {
     static const bool on = [] {
+        if (const char* e = std::getenv("EYE_COLOR")) {
+            if (*e == '0') return false;
+            if (*e == '1') {
+#if defined(_WIN32)
+                if (_isatty(_fileno(stdout))) {
+                    SetConsoleOutputCP(CP_UTF8);
+                    const HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+                    DWORD mode = 0;
+                    if (h != INVALID_HANDLE_VALUE && GetConsoleMode(h, &mode))
+                        SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+                }
+#endif
+                return true;
+            }
+        }
 #if defined(_WIN32)
         if (!_isatty(_fileno(stdout))) return false;
         // Кодовая страница консоли Windows по умолчанию НЕ UTF-8 — без этого
@@ -60,10 +88,12 @@ inline bool enabled() {
 }
 inline const char* code(const char* c) { return enabled() ? c : ""; }
 inline const char* reset()  { return code("\033[0m");        }
-inline const char* gold()   { return code("\033[38;5;178m"); }  // заголовки, рамка-акцент
-inline const char* cyan()   { return code("\033[36m");       }  // типы
+inline const char* gold()   { return code("\033[38;5;178m"); }  // заголовки
+inline const char* cyan()   { return code("\033[36m");       }  // поля (чёт)
+inline const char* cyan2()  { return code("\033[96m");       }  // поля (нечет)
 inline const char* green()  { return code("\033[32m");       }  // значения
 inline const char* grey()   { return code("\033[38;5;245m"); }  // рамка, служебное
+inline const char* dim()    { return code("\033[38;5;240m"); }  // совсем тускло
 inline const char* violet() { return code("\033[35m");       }  // vptr / магия
 inline const char* red()    { return code("\033[38;5;131m"); }  // padding
 } // namespace clr
@@ -71,10 +101,66 @@ inline const char* red()    { return code("\033[38;5;131m"); }  // padding
 namespace detail {
 
 // ════════════════════════════════════════════════════════════════════════════
-//  Геометрия рамки и низкоуровневые примитивы
+//  Геометрия. Панель = «│ » + FRAME_W + « │» = PANEL_W колонок; правее — gutter
+//  с выносками. Всё центрируется отступом margin.
 // ════════════════════════════════════════════════════════════════════════════
-inline constexpr std::size_t FRAME_W = 60;  // ширина внутренней области (в символах)
+inline constexpr std::size_t FRAME_W = 60;             // внутренняя ширина рамки
+inline constexpr std::size_t PANEL_W = FRAME_W + 4;    // рамка целиком
+inline constexpr std::size_t GUT_PRE = 4;              // «◄── » / « ├─ »
+inline constexpr std::size_t GUT_TXT = 40;             // бюджет текста выноски
+inline constexpr std::size_t FULL_W  = PANEL_W + GUT_PRE + GUT_TXT;   // 108
 
+// Колонки схемы памяти (внутри FRAME_W):
+//   off(6) ␣ кирпич(2) ␣ hex-сетка(23) ␣␣ ascii-сетка(8)
+inline constexpr std::size_t MEM_HEX_COL   = 10;  // старт hex-сетки
+inline constexpr std::size_t MEM_ASCII_COL = 35;  // старт ascii-сетки
+
+struct Geo {
+    std::size_t margin = 0;   // отступ слева (центрирование)
+    bool gutter = true;       // выноски сбоку (false → внутрь рамки)
+    bool full   = false;      // EYE_FULL=1 — не сворачивать длинные регионы
+};
+inline Geo& geo() { static Geo g; return g; }
+
+// Ширина терминала: EYE_WIDTH → WinAPI/ioctl → 110 (redirect в файл).
+inline std::size_t term_width() {
+    if (const char* e = std::getenv("EYE_WIDTH"))
+        if (const int v = std::atoi(e); v > 0) return static_cast<std::size_t>(v);
+#if defined(_WIN32)
+    CONSOLE_SCREEN_BUFFER_INFO bi;
+    const HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (h != INVALID_HANDLE_VALUE && GetConsoleScreenBufferInfo(h, &bi))
+        // Именно окно (srWindow), а не буфер: буфер бывает 9999 строк на 120.
+        return static_cast<std::size_t>(bi.srWindow.Right - bi.srWindow.Left + 1);
+#else
+    winsize ws{};
+    if (ioctl(fileno(stdout), TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
+        return ws.ws_col;
+#endif
+    return 110;
+}
+
+// Пересчитать раскладку перед каждой панелью (окно могли растянуть).
+inline void geo_refresh() {
+    Geo g;
+    const std::size_t w = term_width();
+    g.gutter = w >= FULL_W + 2;
+    g.full   = [] { const char* e = std::getenv("EYE_FULL");
+                    return e && *e == '1'; }();
+    const bool center = [] { const char* e = std::getenv("EYE_CENTER");
+                             return !(e && *e == '0'); }();
+    if (center) {
+        const std::size_t need = g.gutter ? FULL_W : PANEL_W;
+        // Потолок 24: в сверхшироком терминале панель у центра уже не ищут.
+        g.margin = w > need ? std::min<std::size_t>((w - need) / 2, 24) : 0;
+    }
+    geo() = g;
+}
+inline std::string margin_str() { return std::string(geo().margin, ' '); }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Низкоуровневые примитивы текста
+// ════════════════════════════════════════════════════════════════════════════
 // Видимая ширина простой (без ANSI) строки = число кодовых точек UTF-8.
 // Считаем все байты, кроме continuation-байтов 10xxxxxx. Для нашего набора
 // (ASCII, кириллица, рамки, блоки) 1 кодовая точка = 1 колонка.
@@ -102,7 +188,6 @@ inline std::string clip(const std::string& s, std::size_t maxcp) {
     return out + "…";
 }
 
-// Дополнить простую строку пробелами до ширины w (слева/справа).
 inline std::string ljust(std::string s, std::size_t w) {
     const std::size_t v = vwidth(s);
     if (v < w) s.append(w - v, ' ');
@@ -137,6 +222,8 @@ struct Line {
         s += c; s += t; s += clr::reset(); w += vwidth(t); return *this;
     }
     Line& sp(std::size_t n = 1) { s.append(n, ' '); w += n; return *this; }
+    // Дополнить пробелами до колонки x (внутри рамки).
+    Line& to(std::size_t x) { if (w < x) sp(x - w); return *this; }
 };
 
 inline std::string dashes(std::size_t n) {
@@ -145,23 +232,29 @@ inline std::string dashes(std::size_t n) {
     return r;
 }
 
-// Рамочная строка контента: │ <content, дополнено до FRAME_W> │
-inline void put(const Line& ln) {
+// Рамочная строка контента: │ <content, дополнено до FRAME_W> │ [выноска]
+inline void put(const Line& ln, const Line* gut = nullptr) {
     const std::size_t pad = ln.w < FRAME_W ? FRAME_W - ln.w : 0;
-    std::cout << clr::grey() << "│" << clr::reset() << ' ' << ln.s
+    std::cout << margin_str()
+              << clr::grey() << "│" << clr::reset() << ' ' << ln.s
               << std::string(pad, ' ') << ' '
-              << clr::grey() << "│" << clr::reset() << '\n';
+              << clr::grey() << "│" << clr::reset();
+    if (gut != nullptr) std::cout << gut->s;
+    std::cout << '\n';
 }
 // Рамочная строка с простым серым текстом (для сообщений).
 inline void put_text(const std::string& t) {
     Line l; l.col(clr::grey(), clip(t, FRAME_W));
     put(l);
 }
+inline void put_blank() { put(Line{}); }
+
 // Верх рамки:      ╭─◈ Заголовок ─────╮
 inline void frame_top(const std::string& title) {
     const std::string t = clip(title, FRAME_W - 3);
     const std::size_t fill = FRAME_W - vwidth(t) - 2;   // t обрезан → fill >= 1
-    std::cout << clr::grey() << "╭─" << clr::violet() << "◈ " << clr::reset()
+    std::cout << margin_str()
+              << clr::grey() << "╭─" << clr::violet() << "◈ " << clr::reset()
               << clr::gold() << t << clr::reset() << ' '
               << clr::grey() << dashes(fill) << "╮" << clr::reset() << '\n';
 }
@@ -169,13 +262,15 @@ inline void frame_top(const std::string& title) {
 inline void frame_sep(const std::string& label) {
     const std::string l = clip(label, FRAME_W - 2);
     const std::size_t fill = FRAME_W - vwidth(l) - 1;
-    std::cout << clr::grey() << "├─ " << clr::reset()
+    std::cout << margin_str()
+              << clr::grey() << "├─ " << clr::reset()
               << clr::gold() << l << clr::reset() << ' '
               << clr::grey() << dashes(fill) << "┤" << clr::reset() << '\n';
 }
 // Низ рамки:       ╰──────────────────╯
 inline void frame_bottom() {
-    std::cout << clr::grey() << "╰" << dashes(FRAME_W + 2) << "╯"
+    std::cout << margin_str()
+              << clr::grey() << "╰" << dashes(FRAME_W + 2) << "╯"
               << clr::reset() << '\n';
 }
 
@@ -198,168 +293,616 @@ inline void render_passport(const Passport& p) {
     chip(l2, p.polymorphic, "polymorphic");
     chip(l2, p.aggregate, "aggregate");
     chip(l2, p.trivially_copyable, "trivially-copyable");
+    l2.col(clr::dim(), "●да ○нет");
     put(l2);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  Поля + карта памяти + сводка по padding (M2/M4)
-//  Ширины колонок (сумма ≤ FRAME_W): off 6 · sz 4 · имя 12 · тип 16 · значение 16
+//  СХЕМА ПАМЯТИ — сердце Гримуара v2.
+//  Регион (vptr / поле / под-часть строки / padding / скрытое) = блок строк.
 // ════════════════════════════════════════════════════════════════════════════
-inline void render_fields(std::vector<FieldInfo> fields, std::size_t total, bool poly) {
-    // Реестр мог перечислить поля не по порядку — сортируем по offset, иначе
-    // карта памяти и строки padding'а посчитаются неверно.
-    std::sort(fields.begin(), fields.end(),
-              [](const FieldInfo& a, const FieldInfo& b) { return a.offset < b.offset; });
+struct Region {
+    enum class R { field, padding, vptr, opaque };
+    R what;
+    std::size_t off, size;
+    const FieldInfo* f;             // для field
+    bool shade;                     // чередование █/▓ между соседними полями
+    int strpart;                    // 1 = .ptr, 2 = .len, 3 = .buf (std::string)
+    std::string why;                // причина padding
 
-    // Шапка таблицы.
-    Line h;
-    h.col(clr::grey(), ljust("off", 6)).sp(2)
-     .col(clr::grey(), rjust("sz", 4)).sp(2)
-     .col(clr::grey(), ljust("поле", 12)).sp()
-     .col(clr::grey(), ljust("тип", 16)).sp()
-     .col(clr::grey(), "значение");
-    put(h);
+    Region(R w, std::size_t o, std::size_t s, const FieldInfo* fi = nullptr,
+           bool sh = false, int sp = 0)
+        : what(w), off(o), size(s), f(fi), shade(sh), strpart(sp) {}
+};
 
-    auto pad_row = [](std::size_t from, std::size_t len) {
-        Line ln;
-        ln.col(clr::red(), hex4(from)).sp(2)
-          .col(clr::red(), rjust(std::to_string(len), 4)).sp(2)
-          .col(clr::red(), "░ padding ░");
-        put(ln);
-    };
-
-    // У полиморфного класса первые 8 байт — не «дыра», а vptr. Честно подписываем.
-    const bool vptr_band = poly && (fields.empty() || fields.front().offset >= 8);
-    std::size_t cursor = 0;
-    if (vptr_band) {
-        Line ln;
-        ln.col(clr::violet(), hex4(0)).sp(2)
-          .col(clr::violet(), rjust("8", 4)).sp(2)
-          .col(clr::violet(), "▒ vptr ▒").sp()
-          .col(clr::grey(), "скрытое поле, см. M3");
-        put(ln);
-        cursor = 8;
+// Роль → глиф кирпича и цвет.
+inline const char* region_glyph(const Region& r) {
+    switch (r.what) {
+        case Region::R::padding: return "░";
+        case Region::R::vptr:    return "▒";
+        case Region::R::opaque:  return "▓";
+        default:                 return r.shade ? "▓" : "█";
     }
+}
+inline const char* region_color(const Region& r) {
+    switch (r.what) {
+        case Region::R::padding: return clr::red();
+        case Region::R::vptr:    return clr::violet();
+        case Region::R::opaque:  return clr::grey();
+        default:                 return r.shade ? clr::cyan2() : clr::cyan();
+    }
+}
 
-    for (const auto& f : fields) {
-        if (f.offset > cursor && f.offset <= total)  // дыра перед полем
-            pad_row(cursor, f.offset - cursor);
-        Line ln;
-        ln.col(clr::grey(), hex4(f.offset)).sp(2)
-          .col(clr::grey(), rjust(std::to_string(f.size), 4)).sp(2)
-          .col(clr::green(), ljust(clip(f.name.empty() ? "?" : f.name, 12), 12)).sp()
-          .col(clr::cyan(),  ljust(clip(f.type, 16), 16)).sp()
-          .col(clr::green(), clip(f.value, 16));
-        put(ln);
+// Разбить поля объекта на регионы. У полиморфных первые 8 байт — vptr.
+// std::string на libstdc++ раскрываем в .ptr / .len / .buf: каждая часть
+// получает СВОИ строки и СВОЮ выноску (иначе подписи съезжают с байтов).
+inline std::vector<Region> build_regions(const std::vector<FieldInfo>& fields,
+                                         std::size_t total, bool poly,
+                                         bool opaque) {
+    std::vector<Region> rs;
+    std::size_t cursor = 0;
+
+    if (poly && (fields.empty() || fields.front().offset >= sizeof(void*))) {
+        rs.push_back({Region::R::vptr, 0, sizeof(void*)});
+        cursor = sizeof(void*);
+    }
+    for (std::size_t i = 0; i < fields.size(); ++i) {
+        const FieldInfo& f = fields[i];
+        if (f.offset > cursor && f.offset <= total) {   // дыра перед полем
+            Region p{Region::R::padding, cursor, f.offset - cursor};
+            p.why = clip(f.name, 12) + " требует адрес, кратный " +
+                    std::to_string(f.align);
+            rs.push_back(p);
+        }
+        const bool shade = i % 2 != 0;
+        // Раскладка {ptr, len, buf} знакома, поле легло по сетке → разбираем.
+        if (f.kind == FieldInfo::Kind::str && f.str_layout &&
+            f.size == 32 && f.offset % 8 == 0) {
+            rs.push_back({Region::R::field, f.offset,      8, &f, shade, 1});
+            rs.push_back({Region::R::field, f.offset + 8,  8, &f, shade, 2});
+            rs.push_back({Region::R::field, f.offset + 16, 16, &f, shade, 3});
+        } else {
+            rs.push_back({Region::R::field, f.offset, f.size, &f, shade});
+        }
         if (f.offset + f.size > cursor) cursor = f.offset + f.size;
     }
-    if (cursor < total) pad_row(cursor, total - cursor);  // хвостовой padding
+    if (opaque && cursor < total)
+        rs.push_back({Region::R::opaque, cursor, total - cursor});
+    else if (cursor < total) {
+        Region p{Region::R::padding, cursor, total - cursor};
+        p.why = "добивка sizeof до кратного выравниванию";
+        rs.push_back(p);
+    }
+    return rs;
+}
 
-    // --- карта памяти: 1 символ = 1 байт, до 32 в ряд, с линейкой offset'ов ---
-    std::string strip(total, 'p');
-    if (vptr_band)
-        for (std::size_t b = 0; b < 8 && b < total; ++b) strip[b] = 'V';
-    for (std::size_t i = 0; i < fields.size(); ++i)
-        for (std::size_t b = 0; b < fields[i].size; ++b) {
-            const std::size_t at = fields[i].offset + b;
-            if (at < strip.size()) strip[at] = (i % 2 == 0) ? 'A' : 'B';  // без OOB
+// Строки региона: режем по АБСОЛЮТНОЙ 8-байтовой сетке (байт со смещением N
+// печатается в колонке N%8 — выравнивание видно колонками). Длинные регионы
+// сворачиваем: 2 строки + «⋯ ещё …» + последняя (EYE_FULL=1 отключает).
+struct MRow {
+    std::size_t at = 0;    // offset первого байта строки
+    std::size_t n = 0;     // байт в строке (0 → строка-фолд)
+    std::size_t skip = 0;  // сколько байт спрятано (для фолда)
+};
+inline std::vector<MRow> region_rows(std::size_t off, std::size_t size) {
+    std::vector<MRow> rows;
+    const std::size_t end = off + size;
+    for (std::size_t line = off / 8 * 8; line < end; line += 8)
+        rows.push_back({std::max(off, line), std::min(end, line + 8) -
+                                             std::max(off, line), 0});
+    if (!geo().full && rows.size() > 4) {
+        std::size_t hidden = 0;
+        for (std::size_t i = 2; i + 1 < rows.size(); ++i) hidden += rows[i].n;
+        std::vector<MRow> cut(rows.begin(), rows.begin() + 2);
+        cut.push_back({rows[2].at, 0, hidden});
+        cut.push_back(rows.back());
+        return cut;
+    }
+    return rows;
+}
+
+// Одна hex-строка схемы: off ␣ кирпич ␣ [сетка hex] ␣␣ [сетка ascii].
+inline Line mem_row(const MRow& r, const Region& reg, const unsigned char* base) {
+    const char* c = region_color(reg);
+    Line ln;
+    ln.col(clr::grey(), hex4(r.at)).sp();
+    ln.col(c, std::string(region_glyph(reg)) + region_glyph(reg));
+    if (r.n == 0) {   // строка-фолд
+        ln.to(MEM_HEX_COL);
+        ln.col(c, "⋯ ещё " + std::to_string(r.skip) + " Б ⋯");
+        return ln;
+    }
+    // hex: байт со смещением o — в колонке MEM_HEX_COL + (o%8)*3.
+    ln.to(MEM_HEX_COL + (r.at % 8) * 3);
+    std::string hex;
+    bool has_print = false;
+    std::string ascii;
+    for (std::size_t i = 0; i < r.n; ++i) {
+        const unsigned char b = base[r.at + i];
+        hex += hex2(b);
+        if (i + 1 < r.n) hex += ' ';
+        const bool pr = std::isprint(b) != 0;
+        has_print = has_print || pr;
+        ascii += pr ? static_cast<char>(b) : '.';
+    }
+    ln.col(c, hex);
+    // ascii: той же сеткой; сплошные точки тушим — глаз ищет буквы (Solmyr!).
+    ln.to(MEM_ASCII_COL + r.at % 8);
+    ln.col(has_print ? c : clr::dim(), ascii);
+    return ln;
+}
+
+// ---- Выноски: текст сбоку от рамки (или внутри — компактный режим) ---------
+
+// «имя · тип · N Б = значение» в жёсткий бюджет: имя ≤ 16, размер всегда,
+// первым режем тип, значение — сколько останется (минимум 6).
+inline Line field_headline(const FieldInfo& f, std::size_t budget,
+                           bool with_alt = true) {
+    const std::string name = clip(f.name, 16);
+    const std::string sz = std::to_string(f.size) + " Б";
+    // «= [массив N байт]» дублирует размер — у массивов значение опускаем.
+    const bool no_val = f.value.rfind("[массив", 0) == 0;
+    const std::size_t fixed = vwidth(name) + 3 + 3 + vwidth(sz) + 3;  // « · »×2 + « = »
+    const std::size_t val_keep =
+        no_val ? 0 : std::min<std::size_t>(vwidth(f.value), 6);
+    std::size_t type_w = budget > fixed + val_keep ? budget - fixed - val_keep : 6;
+    type_w = std::min(type_w, vwidth(f.type));
+
+    Line l;
+    l.col(clr::green(), name).col(clr::grey(), " · ")
+     .col(clr::cyan(), clip(f.type, type_w)).col(clr::grey(), " · ")
+     .col(clr::grey(), sz);
+    if (no_val) return l;
+    l.col(clr::grey(), " = ");
+    l.col(clr::green(), clip(f.value, budget > l.w ? budget - l.w : 0));
+    if (with_alt && f.integral && !f.alt.empty() &&
+        l.w + vwidth(f.alt) + 3 <= budget)
+        l.col(clr::grey(), " (" + f.alt + ")");
+    return l;
+}
+
+// Куда смотрит указатель: в никуда / внутрь этого объекта / наружу.
+inline void pointer_notes(std::vector<Line>& out, const FieldInfo& f,
+                          const unsigned char* base, std::size_t total,
+                          std::size_t budget) {
+    if (f.target == nullptr) {
+        Line l; l.col(clr::grey(), "► nullptr — не указывает никуда");
+        out.push_back(l);
+        return;
+    }
+    const auto b = reinterpret_cast<std::uintptr_t>(base);
+    const auto t = reinterpret_cast<std::uintptr_t>(f.target);
+    if (t >= b && t < b + total) {
+        Line l;
+        l.col(clr::gold(), "► внутрь ЭТОГО объекта: база+" +
+                               hex4(static_cast<std::size_t>(t - b)));
+        out.push_back(l);
+    } else {
+        Line l; l.col(clr::grey(), "► наружу, за пределы объекта");
+        out.push_back(l);
+    }
+    if (!f.pointee.empty()) {
+        Line l;
+        l.col(clr::grey(), "по адресу лежит: ")
+         .col(clr::green(), clip(f.pointee, budget > 17 ? budget - 17 : 0));
+        out.push_back(l);
+    }
+}
+
+// Выноски региона (каждая строка ≤ budget колонок).
+inline std::vector<Line> region_notes(const Region& r, const unsigned char* base,
+                                      std::size_t total, bool standalone,
+                                      std::size_t budget) {
+    std::vector<Line> out;
+    switch (r.what) {
+        case Region::R::vptr: {
+            Line l1; l1.col(clr::violet(), "vptr → vtable класса (секция ▼)");
+            Line l2; l2.col(clr::grey(), "скрытое поле: его вставил virtual");
+            out = {l1, l2};
+            break;
         }
+        case Region::R::padding: {
+            Line l1;
+            l1.col(clr::red(), "padding " + std::to_string(r.size) +
+                                   " Б — дыра, внутри мусор");
+            Line l2; l2.col(clr::grey(), clip(r.why, budget));
+            out = {l1, l2};
+            break;
+        }
+        case Region::R::opaque: {
+            Line l1; l1.col(clr::grey(), "поля скрыты: private/конструкторы");
+            Line l2; l2.col(clr::grey(), "добавь EYE_DESCRIBE — Око увидит");
+            out = {l1, l2};
+            break;
+        }
+        case Region::R::field: {
+            const FieldInfo& f = *r.f;
+            if (r.strpart == 1) {          // .ptr — куда смотрит строка
+                Line l;
+                l.col(clr::green(), clip(f.name, 10) + ".ptr")
+                 .col(clr::grey(), " = ").plain(hexptr(f.target));
+                out.push_back(l);
+                Line l2;
+                if (f.sso) {
+                    const auto b = reinterpret_cast<std::uintptr_t>(base);
+                    const auto t = reinterpret_cast<std::uintptr_t>(f.target);
+                    l2.col(clr::gold(), "► это база+" +
+                        hex4(static_cast<std::size_t>(t - b)) +
+                        " — свой же буфер ▼");
+                } else {
+                    l2.col(clr::gold(), "► далеко от объекта: КУЧА (ниже ▼)");
+                }
+                out.push_back(l2);
+            } else if (r.strpart == 2) {   // .len
+                Line l;
+                l.col(clr::green(), clip(f.name, 10) + ".len")
+                 .col(clr::grey(), " = ")
+                 .col(clr::green(), std::to_string(f.str_len))
+                 .col(clr::grey(), " — длина строки");
+                out.push_back(l);
+            } else if (r.strpart == 3) {   // .buf / .cap
+                if (f.sso) {
+                    Line l;
+                    l.col(clr::green(), clip(f.name, 10) + ".buf")
+                     .col(clr::grey(), " = ")
+                     .col(clr::green(), clip(f.value, budget > 20 ? budget - 20
+                                                                  : 6));
+                    out.push_back(l);
+                    Line l2;
+                    l2.col(clr::grey(), "символы ЗДЕСЬ (SSO, до 15 симв.)");
+                    out.push_back(l2);
+                } else {
+                    Line l;
+                    l.col(clr::green(), clip(f.name, 10) + ".cap")
+                     .col(clr::grey(), " = ")
+                     .col(clr::green(), std::to_string(f.str_cap))
+                     .col(clr::grey(), " — вместимость");
+                    out.push_back(l);
+                    Line l2;
+                    l2.col(clr::grey(), "SSO-буфер пуст: символы в куче");
+                    out.push_back(l2);
+                }
+            } else {                        // обычное поле
+                // Для одиночного значения hex уйдёт отдельной строкой-уроком.
+                out.push_back(field_headline(f, budget, !standalone));
+                if (f.kind == FieldInfo::Kind::pointer)
+                    pointer_notes(out, f, base, total, budget);
+                if (f.kind == FieldInfo::Kind::str && !f.str_layout) {
+                    Line l2;
+                    if (f.sso)
+                        l2.col(clr::gold(), "SSO: буфер прямо в объекте");
+                    else
+                        l2.col(clr::gold(), "буфер в КУЧЕ — панель ниже ▼");
+                    out.push_back(l2);
+                    Line l3;
+                    l3.col(clr::grey(), "длина " + std::to_string(f.str_len) +
+                                            " · вместимость " +
+                                            std::to_string(f.str_cap));
+                    out.push_back(l3);
+                }
+                if (standalone && f.integral && !f.alt.empty()) {
+                    Line l2;
+                    l2.col(clr::grey(), "hex: ").col(clr::cyan(), f.alt);
+                    out.push_back(l2);
+                    Line l3;
+                    l3.col(clr::grey(), "в дампе — задом наперёд: little-endian");
+                    out.push_back(l3);
+                }
+            }
+            break;
+        }
+    }
+    return out;
+}
 
-    put_text("· карта памяти (1 символ = 1 байт)");
-    for (std::size_t base = 0; base < total; base += 32) {
-        const std::size_t len = std::min<std::size_t>(32, total - base);
-        // линейка: число через каждые 8 байт, выровнено под глифы карты
-        Line ruler;
-        for (std::size_t i = 0; i < len; i += 8)
-            ruler.col(clr::grey(), ljust(std::to_string(base + i),
-                                         std::min<std::size_t>(8, len - i)));
-        put(ruler);
-        // сами байты
-        Line m;
-        for (std::size_t i = 0; i < len; ++i) {
-            switch (strip[base + i]) {
-                case 'A': m.col(clr::cyan(),   "█"); break;
-                case 'B': m.col(clr::cyan(),   "▓"); break;
-                case 'V': m.col(clr::violet(), "▒"); break;
-                default:  m.col(clr::red(),    "░"); break;
+// Соединитель выноски: одна строка — «◄── », блок — скобка ◄┬─ / ├─ / ╰─.
+inline Line gut_connector(std::size_t i, std::size_t k, bool has_text) {
+    Line g;
+    const char* pre = k == 1        ? "◄── "
+                      : i == 0      ? "◄┬─ "
+                      : i + 1 == k  ? (has_text ? " ╰─ " : " ╰──")
+                                    : (has_text ? " ├─ " : " │");
+    g.col(clr::grey(), pre);
+    return g;
+}
+
+// ---- Сама секция «память» ---------------------------------------------------
+inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
+                          std::size_t talign, bool poly, const void* addr,
+                          bool opaque, bool standalone) {
+    const auto* base = static_cast<const unsigned char*>(addr);
+    // Реестр мог перечислить поля не по порядку — сортируем по offset, иначе
+    // регионы и padding посчитаются неверно.
+    std::sort(fields.begin(), fields.end(),
+              [](const FieldInfo& a, const FieldInfo& b) {
+                  return a.offset < b.offset;
+              });
+    const auto regions = build_regions(fields, total, poly, opaque);
+    const bool gutter = geo().gutter;
+
+    // Шапка-линейка: подписи колонок стоят РОВНО над своими данными.
+    Line h;
+    h.col(clr::grey(), "off").to(MEM_HEX_COL);
+    for (int i = 0; i < 8; ++i)
+        h.col(clr::dim(), "+" + std::to_string(i)).sp(i == 7 ? 0 : 1);
+    h.to(MEM_ASCII_COL).col(clr::dim(), "ascii");
+    put(h);
+
+    for (const Region& r : regions) {
+        const auto rows  = region_rows(r.off, r.size);
+        const auto notes = region_notes(r, base, total, standalone,
+                                        gutter ? GUT_TXT : FRAME_W - 8);
+        if (gutter) {
+            // Строк — сколько нужно и байтам, и выноскам; недостающие рамочные
+            // строки — пустые. Выноска i стоит СТРОГО напротив своей строки.
+            const std::size_t k = std::max(rows.size(), notes.size());
+            for (std::size_t i = 0; i < k; ++i) {
+                const Line frame =
+                    i < rows.size() ? mem_row(rows[i], r, base) : Line{};
+                if (i < notes.size()) {
+                    Line g = gut_connector(i, k, true);
+                    g.s += notes[i].s;
+                    g.w += notes[i].w;
+                    put(frame, &g);
+                } else if (k > 1) {           // скобка тянется на весь регион
+                    const Line g = gut_connector(i, k, false);
+                    put(frame, &g);
+                } else {
+                    put(frame);
+                }
+            }
+        } else {
+            // Компактный режим: сперва байты, потом выноски внутри рамки.
+            for (const MRow& mr : rows) put(mem_row(mr, r, base));
+            for (std::size_t i = 0; i < notes.size(); ++i) {
+                Line l;
+                l.to(3).col(clr::grey(), i == 0 ? "└► " : "   ");
+                l.s += notes[i].s; l.w += notes[i].w;
+                put(l);
             }
         }
-        put(m);
     }
-    // легенда
-    Line leg;
-    leg.col(clr::cyan(), "█").col(clr::grey(), " поле").sp(3)
-       .col(clr::red(), "░").col(clr::grey(), " padding").sp(3)
-       .col(clr::violet(), "▒").col(clr::grey(), " vptr");
-    put(leg);
 
-    // --- сводка: считаем ПО КАРТЕ (дубли/перекрытия полей не переполнят size_t) -
-    std::size_t field_bytes = 0, vptr_bytes = 0;
-    for (char c : strip) {
-        if (c == 'A' || c == 'B') ++field_bytes;
-        else if (c == 'V')        ++vptr_bytes;
-    }
-    const std::size_t padding = strip.size() - field_bytes - vptr_bytes;
-    Line sum;
-    sum.col(clr::grey(), "занято ").col(clr::green(), std::to_string(field_bytes));
-    if (vptr_band) sum.col(clr::grey(), "  ·  vptr ").col(clr::violet(), std::to_string(vptr_bytes));
-    sum.col(clr::grey(), "  ·  дыры ").col(clr::red(), std::to_string(padding))
-       .col(clr::grey(), " (" + std::to_string(total ? padding * 100 / total : 0) + "%)");
-    put(sum);
-}
+    // --- легенда (только реально встреченные роли) + сводка -------------------
+    bool has_pad = false, has_vptr = false, has_field = false, has_op = false;
+    std::string strip(total, '.');
+    for (const Region& r : regions)
+        for (std::size_t b = r.off; b < r.off + r.size && b < total; ++b)
+            switch (r.what) {
+                case Region::R::field:   strip[b] = 'f'; has_field = true; break;
+                case Region::R::padding: strip[b] = 'p'; has_pad = true;   break;
+                case Region::R::vptr:    strip[b] = 'v'; has_vptr = true;  break;
+                case Region::R::opaque:  strip[b] = 'o'; has_op = true;    break;
+            }
+    std::size_t nf = 0, np = 0, nv = 0;
+    for (char c : strip) { nf += c == 'f' || c == 'o'; np += c == 'p'; nv += c == 'v'; }
+    np += static_cast<std::size_t>(
+        std::count(strip.begin(), strip.end(), '.'));   // не покрыто = дыра
 
-// ════════════════════════════════════════════════════════════════════════════
-//  Секция vtable (M3)
-// ════════════════════════════════════════════════════════════════════════════
-inline void render_vtable(const VtableInfo& vi) {
-    Line l1;
-    l1.col(clr::violet(), ljust("vptr", 14)).plain(hexptr(vi.vptr))
-      .sp(2).col(clr::grey(), "первые 8 байт объекта");
-    put(l1);
-    Line l2;
-    l2.col(clr::violet(), ljust("динамич. тип", 14))
-      .col(clr::cyan(), clip(vi.dyn_type, FRAME_W - 16)).sp()
-      .col(clr::grey(), "(RTTI)");
-    put(l2);
-    if (vi.itanium) {
-        Line l3;
-        l3.col(clr::violet(), ljust("offset-to-top", 14))
-          .plain(std::to_string(vi.offset_to_top));
-        put(l3);
-        Line l4;
-        l4.col(clr::violet(), ljust("слот [0]", 14))
-          .col(clr::green(), hexptr(vi.slot0)).sp()
-          .col(clr::grey(), "1-я вирт. функция");
-        put(l4);
-    } else {
-        put_text("offset-to-top и слоты vtable — деталь Itanium ABI (GCC/Clang);");
-        put_text("у MSVC раскладка другая, сырые ячейки не читаем.");
-    }
-}
+    // Одиночное значение без дыр — легенда и сводка не скажут ничего нового.
+    const bool trivial = standalone && np == 0 && !has_vptr;
+    if (!trivial) {
+        put_blank();
+        Line leg;
+        if (has_field) leg.col(clr::cyan(), "█▓").col(clr::grey(), " поля (сосед — другой тон)  ");
+        if (has_pad)   leg.col(clr::red(), "░").col(clr::grey(), " padding  ");
+        if (has_vptr)  leg.col(clr::violet(), "▒").col(clr::grey(), " vptr  ");
+        if (has_op)    leg.col(clr::grey(), "▓ скрытое");
+        put(leg);
 
-// ════════════════════════════════════════════════════════════════════════════
-//  Hex-дамп сырых байтов (M1)
-// ════════════════════════════════════════════════════════════════════════════
-inline void render_bytes(const void* addr, std::size_t size) {
-    const auto* bytes = static_cast<const unsigned char*>(addr);
-    const std::size_t shown = std::min<std::size_t>(size, 128);
-
-    for (std::size_t row = 0; row < shown; row += 8) {
-        Line ln;
-        ln.col(clr::grey(), hex4(row)).sp(2);
-        for (std::size_t i = row; i < row + 8; ++i) {
-            if (i < shown) ln.col(clr::cyan(), hex2(bytes[i])).sp();
-            else           ln.sp(3);
+        Line sum;
+        sum.col(clr::grey(), "занято ").col(clr::green(), std::to_string(nf + nv))
+           .col(clr::grey(), " из " + std::to_string(total) + " Б");
+        if (np > 0) {
+            const std::size_t pct = total ? np * 100 / total : 0;
+            sum.col(clr::grey(), "  ·  padding ")
+               .col(clr::red(), std::to_string(np) + " Б (" + std::to_string(pct) + "%)");
         }
-        ln.sp().col(clr::green(), "│");
-        std::string ascii;
-        for (std::size_t i = row; i < row + 8 && i < shown; ++i)
-            ascii += std::isprint(bytes[i]) ? static_cast<char>(bytes[i]) : '.';
-        ln.col(clr::green(), ascii).col(clr::green(), "│");
+        put(sum);
+    }
+
+    // --- урок little-endian на первом же целом поле объекта -------------------
+    if (!standalone) {
+        for (const FieldInfo& f : fields)
+            if (f.integral && !f.alt.empty() && f.size <= 4 &&
+                f.offset + f.size <= total) {
+                std::string bytes;
+                for (std::size_t i = 0; i < f.size; ++i)
+                    bytes += hex2(base[f.offset + i]) + (i + 1 < f.size ? " " : "");
+                Line le;
+                le.col(clr::grey(), "байты наоборот (LE): ")
+                  .col(clr::cyan(), bytes)
+                  .col(clr::grey(), " → ")
+                  .col(clr::cyan(), f.alt);
+                if (le.w + vwidth(f.value) + 3 <= FRAME_W)
+                    le.col(clr::grey(), " = ").col(clr::green(), f.value);
+                if (le.w <= FRAME_W) put(le);
+                break;
+            }
+    }
+
+    // --- совет по перестановке (привет, pahole) --------------------------------
+    if (np > 0 && !poly && !opaque && fields.size() > 1) {
+        auto sorted = fields;
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const FieldInfo& a, const FieldInfo& b) {
+                      return a.align != b.align ? a.align > b.align
+                                                : a.size > b.size;
+                  });
+        std::size_t cur = 0, maxal = talign;
+        for (const FieldInfo& f : sorted) {
+            if (f.align) cur = (cur + f.align - 1) / f.align * f.align;
+            cur += f.size;
+            maxal = std::max(maxal, f.align);
+        }
+        const std::size_t news = (cur + maxal - 1) / maxal * maxal;
+        if (news < total) {
+            Line a;
+            a.col(clr::gold(), "◇ переставь поля по убыванию align: ")
+             .col(clr::green(), std::to_string(news) + " Б")
+             .col(clr::grey(), " вместо " + std::to_string(total));
+            put(a);
+            std::string order;
+            for (std::size_t i = 0; i < sorted.size(); ++i)
+                order += (i ? " · " : "") + sorted[i].name;
+            put_text("  порядок: " + order);
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Секция vtable (M3) — блок-диаграмма: объект → vptr → vtable → слот → код
+// ════════════════════════════════════════════════════════════════════════════
+inline void render_vtable(const VtableInfo& vi, std::size_t obj_size) {
+    // Текстовая строка-факт: те же 8 байт, что лежали в начале дампа.
+    Line l1;
+    l1.col(clr::violet(), "vptr = ").plain(hexptr(vi.vptr))
+      .col(clr::grey(), " · динамич. тип: ")
+      .col(clr::cyan(), clip(vi.dyn_type, 18));
+    put(l1);
+    put_blank();
+
+    const std::string dyn = clip(vi.dyn_type, 12);
+    // Левый бокс (объект, 13 внутри) + стрелка + правый бокс (vtable, 29).
+    // Адрес в шапке бокса = те же 8 байт, что видны в дампе как регион ▒ vptr.
+    Line cap;
+    cap.sp(3).col(clr::grey(), "этот объект").to(27)
+       .col(clr::gold(), "vtable «" + dyn + "» @ ").plain(hexptr(vi.vptr));
+    put(cap);
+    {
+        Line ln;
+        ln.sp(2).col(clr::grey(), "┌─────────────┐        "
+                                  "┌─────────────────────────────┐");
         put(ln);
     }
-    if (shown < size)
-        put_text("... ещё " + std::to_string(size - shown) + " байт скрыто");
+    { // vptr ●────────► [-2] ...
+        Line ln;
+        ln.sp(2).col(clr::grey(), "│ ")
+          .col(clr::violet(), "0x00 vptr ")
+          .col(clr::violet(), "●").col(clr::grey(), "─┼───────►│ ")
+          .col(vi.itanium ? clr::dim() : clr::grey(),
+               vi.itanium ? ljust("[-2] offset-to-top = " +
+                                      std::to_string(vi.offset_to_top), 28)
+                          : ljust("typeinfo «" + dyn + "» (RTTI)", 28))
+          .col(clr::grey(), "│");
+        put(ln);
+    }
+    { // поля… │ [-1] typeinfo
+        Line ln;
+        ln.sp(2).col(clr::grey(), "│ ")
+          .col(clr::cyan(), obj_size > sizeof(void*) ? "0x08 поля…" : "          ")
+          .col(clr::grey(), "  │        │ ")
+          .col(clr::dim(), ljust(vi.itanium ? "[-1] typeinfo «" + dyn + "»"
+                                            : "(служебные ячейки)", 28))
+          .col(clr::grey(), "│");
+        put(ln);
+    }
+    { // └──┘ │ [ 0] слот
+        Line ln;
+        ln.sp(2).col(clr::grey(), "└─────────────┘        │ ");
+        if (vi.itanium)
+            ln.col(clr::green(), ljust("[ 0] 1-я virtual-функция:", 28));
+        else
+            ln.col(clr::grey(), ljust("слоты: у MSVC своя раскладка", 28));
+        ln.col(clr::grey(), "│");
+        put(ln);
+    }
+    { // адрес кода / примечание
+        Line ln;
+        ln.sp(2).col(clr::grey(), "               ").sp(8).col(clr::grey(), "│ ");
+        if (vi.itanium)
+            ln.col(clr::green(), ljust("     код @ " + hexptr(vi.slot0), 28));
+        else
+            ln.col(clr::grey(), ljust("     сырые ячейки не читаем", 28));
+        ln.col(clr::grey(), "│");
+        put(ln);
+    }
+    {
+        Line ln;
+        ln.sp(2).plain("                       ")
+          .col(clr::grey(), "└─────────────────────────────┘");
+        put(ln);
+    }
+    put_blank();
+    put_text("vptr — у КАЖДОГО объекта · vtable — ОДНА на класс");
+    Line tr;
+    tr.col(clr::grey(), "вызов virtual: объект → vptr → слот [0] → прыжок на код");
+    put(tr);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Панели-спутники: буферы std::string, живущие в куче. Печатаются ПОСЛЕ
+//  главной панели — куча и правда живёт «где-то ещё», не внутри объекта.
+// ════════════════════════════════════════════════════════════════════════════
+inline void render_satellites(const std::vector<FieldInfo>& fields,
+                              const void* addr) {
+    constexpr std::size_t SAT_W = 44;   // внутренняя ширина мини-рамки
+    const std::string ind = margin_str() + "   ";
+
+    for (const FieldInfo& f : fields) {
+        if (f.kind != FieldInfo::Kind::str || f.sso || f.heap_bytes.empty())
+            continue;
+        // Стрелка-связка от главной панели к спутнику.
+        std::cout << ind << clr::grey() << "│" << clr::reset() << '\n';
+        std::cout << ind << clr::grey() << "╰─► " << clr::reset()
+                  << clr::green() << f.name << ".ptr" << clr::reset()
+                  << clr::grey() << " ведёт сюда — в КУЧУ (далеко от объекта @ "
+                  << clr::reset() << hexptr(addr) << clr::grey() << "):"
+                  << clr::reset() << '\n';
+
+        const std::string pre = ind + "    ";
+        auto sat_line = [&](const Line& ln) {
+            const std::size_t pad = ln.w < SAT_W ? SAT_W - ln.w : 0;
+            std::cout << pre << clr::grey() << "│" << clr::reset() << ' '
+                      << ln.s << std::string(pad, ' ') << ' '
+                      << clr::grey() << "│" << clr::reset() << '\n';
+        };
+        // Верх: ╭─◈ куча @ 0x… ─╮
+        {
+            const std::string t =
+                clip("куча @ " + hexptr(f.target) + " · буфер «" + f.name + "»",
+                     SAT_W - 3);
+            std::cout << pre << clr::grey() << "╭─" << clr::violet() << "◈ "
+                      << clr::reset() << clr::gold() << t << clr::reset() << ' '
+                      << clr::grey() << dashes(SAT_W - vwidth(t) - 2) << "╮"
+                      << clr::reset() << '\n';
+        }
+        {
+            Line info;
+            info.col(clr::grey(), "длина ")
+                .col(clr::green(), std::to_string(f.str_len))
+                .col(clr::grey(), " · вместимость ")
+                .col(clr::green(), std::to_string(f.str_cap))
+                .col(clr::grey(), " · хвост '\\0'");
+            sat_line(info);
+        }
+        for (std::size_t rowb = 0; rowb < f.heap_bytes.size(); rowb += 8) {
+            Line ln;
+            std::string hex, ascii;
+            bool has_print = false;
+            for (std::size_t i = rowb;
+                 i < rowb + 8 && i < f.heap_bytes.size(); ++i) {
+                const unsigned char b = f.heap_bytes[i];
+                hex += hex2(b);
+                hex += ' ';
+                const bool pr = std::isprint(b) != 0;
+                has_print = has_print || pr;
+                ascii += pr ? static_cast<char>(b) : '.';
+            }
+            ln.col(clr::green(), ljust(hex, 24)).sp()
+              .col(has_print ? clr::green() : clr::dim(), ascii);
+            sat_line(ln);
+        }
+        if (f.str_len + 1 > f.heap_bytes.size()) {
+            Line more;
+            more.col(clr::grey(), "⋯ ещё " +
+                     std::to_string(f.str_len + 1 - f.heap_bytes.size()) +
+                     " Б ⋯");
+            sat_line(more);
+        }
+        std::cout << pre << clr::grey() << "╰" << dashes(SAT_W + 2) << "╯"
+                  << clr::reset() << '\n';
+    }
 }
 
 } // namespace detail
