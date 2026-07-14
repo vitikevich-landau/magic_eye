@@ -15,6 +15,15 @@ struct LongNames {
     EYE_DESCRIBE(LongNames, this_is_a_deliberately_long_field_name, text)
 };
 
+struct Links {
+    int value = 42;
+    int* inside = nullptr;
+    int* outside = nullptr;
+    int* nowhere = nullptr;
+
+    EYE_DESCRIBE(Links, value, inside, outside, nowhere)
+};
+
 void set_env(const char* name, const char* value) {
 #if defined(_WIN32)
     _putenv_s(name, value);
@@ -66,6 +75,22 @@ int main() {
                  "long field name was unnecessarily clipped");
     ok &= expect(wide.find("имена из EYE_DESCRIBE") != std::string::npos,
                  "memory section label was unnecessarily clipped");
+    ok &= expect(wide.find("итог:") != std::string::npos &&
+                     wide.find("· полей 2 · данные") != std::string::npos,
+                 "one-line memory summary is missing");
+    ok &= expect(wide.find("#1 this_is_a_deliberately_long_field_name") !=
+                     std::string::npos,
+                 "stable field number is missing");
+    ok &= expect(wide.find("в объекте: +0x0000…+0x0003") !=
+                     std::string::npos,
+                 "inclusive field byte range is missing");
+    ok &= expect(wide.find("► КУЧА @ ") != std::string::npos &&
+                     wide.find("#2 text.ptr ведёт во внешний блок") !=
+                         std::string::npos,
+                 "heap string connection is missing");
+    ok &= expect(wide.find("◄ диапазон байт  ► наружу  ↩ внутрь  × nullptr") !=
+                     std::string::npos,
+                 "connection legend is missing");
 
     const std::string hostile = render_at(126, "строка\n\033[31mслом рамки");
     ok &= expect(hostile.find('\033') == std::string::npos,
@@ -86,6 +111,24 @@ int main() {
     ok &= expect(pointers.str().find("адрес может быть невалиден") !=
                      std::string::npos,
                  "pointer safety note is missing");
+
+    int external = 7;
+    Links links;
+    links.inside = &links.value;
+    links.outside = &external;
+    std::ostringstream link_map;
+    old = std::cout.rdbuf(link_map.rdbuf());
+    eye::inspect(links, "связи указателей");
+    std::cout.rdbuf(old);
+    ok &= expect(link_map.str().find("↩ этот объект: база+0x0000") !=
+                     std::string::npos,
+                 "internal pointer connection is missing");
+    ok &= expect(link_map.str().find("► внешняя память @ ") !=
+                     std::string::npos,
+                 "external pointer connection is missing");
+    ok &= expect(link_map.str().find("× nullptr — связь обрывается") !=
+                     std::string::npos,
+                 "null pointer terminator is missing");
     ok &= expect(!eye::detail::stringify(&function_target).empty(),
                  "function pointer formatting failed");
 
