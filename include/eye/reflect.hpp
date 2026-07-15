@@ -184,12 +184,22 @@ inline constexpr bool is_std_array_v =
 // ════════════════════════════════════════════════════════════════════════════
 //  Наследование: реестр баз EYE_BASES и определение virtual-баз
 // ════════════════════════════════════════════════════════════════════════════
-// Тип-метка базы: EYE_BASES(A, B) отдаёт tuple<BaseTag<A>, BaseTag<B>>.
+// Тип-метка базы: EYE_BASES(T, A, B) отдаёт tuple<BaseTag<A>, BaseTag<B>>.
 template <class B> struct BaseTag { using type = B; };
 
-// Есть ли у класса реестр баз EYE_BASES?
+// Есть ли у класса реестр баз EYE_BASES (в т.ч. УНАСЛЕДОВАННЫЙ — eye_bases()
+// статическая, находится по наследству)?
 template <class T>
 concept has_bases = requires { T::eye_bases(); };
+
+// Реестр баз объявлен в САМОМ T, а не подхвачен от базы. EYE_BASES(T, …) ставит
+// `using eye_bases_self = T;`. Без этой проверки у наследника без своего
+// EYE_BASES (Leaf : Mid) has_bases был бы true, и gather применил бы реестр
+// Mid к Leaf — привёл бы Leaf к базам Mid, пропустив сам под-объект Mid.
+template <class T>
+concept own_bases =
+    has_bases<T> &&
+    requires { requires std::is_same_v<typename T::eye_bases_self, T>; };
 
 // Виртуальная ли база B у D? Приём: обратный привод B*→D* СУЩЕСТВУЕТ для
 // невиртуальной базы и ill-formed для виртуальной (нельзя спуститься из vbase).
@@ -700,9 +710,10 @@ void gather(const T& obj, ObjectModel& m, const unsigned char* md_base,
     }
 
     // 2) базы (глубже) — их поля лягут по абсолютным offset'ам, порядок неважен:
-    //    перед отрисовкой всё сортируется по offset.
+    //    перед отрисовкой всё сортируется по offset. Берём ТОЛЬКО свой реестр
+    //    баз — унаследованный eye_bases() относится к базе, не к T.
     bool self_has_vbase = false;
-    if constexpr (has_bases<T>) {
+    if constexpr (own_bases<T>) {
         std::apply(
             [&](auto... tag) {
                 (..., [&](auto t) {
@@ -808,13 +819,16 @@ ObjectModel model_of(const T& obj) {
         return std::tuple{EYE_FOR_EACH(EYE_ENTRY, __VA_ARGS__)};      \
     }
 
-// Реестр баз: EYE_BASES(A, B) → метод eye_bases() c tuple<BaseTag<A>,BaseTag<B>>.
+// Реестр баз: EYE_BASES(Type, A, B) → метод eye_bases() c tuple<BaseTag<A>,…>.
+// Первым идёт САМ тип (как в EYE_DESCRIBE) — по нему помечаем принадлежность
+// реестра (eye_bases_self), чтобы унаследованный eye_bases() не приняли за свой.
 // Ставится в public-часть НАСЛЕДНИКА рядом с EYE_DESCRIBE. В самом EYE_DESCRIBE
 // тогда перечисляются только СОБСТВЕННЫЕ поля — поля каждой базы Око возьмёт из
 // ЕЁ реестра (поэтому видны и private-поля базы). Базы должны быть публичными:
 // Око приводит объект к базе через static_cast, а он требует доступной базы.
 #define EYE_BASE_ENTRY(B) eye::detail::BaseTag<B>{},
-#define EYE_BASES(...)                                                \
+#define EYE_BASES(Type, ...)                                          \
+    using eye_bases_self = Type;                                      \
     static constexpr auto eye_bases() {                               \
         return std::tuple{EYE_FOR_EACH(EYE_BASE_ENTRY, __VA_ARGS__)}; \
     }

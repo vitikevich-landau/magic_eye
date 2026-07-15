@@ -24,7 +24,7 @@ class Mage : public virtual Being {
     int mana = 10;
 
 public:
-    EYE_BASES(Being)
+    EYE_BASES(Mage, Being)
     EYE_DESCRIBE(Mage, mana)
 };
 
@@ -32,7 +32,7 @@ class Warrior : public virtual Being {
     int strength = 20;
 
 public:
-    EYE_BASES(Being)
+    EYE_BASES(Warrior, Being)
     EYE_DESCRIBE(Warrior, strength)
 };
 
@@ -41,7 +41,7 @@ class Paladin : public Mage, public Warrior {
     int faith = 5;
 
 public:
-    EYE_BASES(Mage, Warrior)
+    EYE_BASES(Paladin, Mage, Warrior)
     EYE_DESCRIBE(Paladin, faith)
 };
 

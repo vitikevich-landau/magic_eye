@@ -28,7 +28,7 @@ class Knight : public Unit {
     std::string banner = "Griffin";
 
 public:
-    EYE_BASES(Unit)
+    EYE_BASES(Knight, Unit)
     EYE_DESCRIBE(Knight, armor, banner)
 };
 
@@ -37,7 +37,7 @@ class Paladin : public Knight {
     int faith = 42;
 
 public:
-    EYE_BASES(Knight)
+    EYE_BASES(Paladin, Knight)
     EYE_DESCRIBE(Paladin, faith)
 };
 

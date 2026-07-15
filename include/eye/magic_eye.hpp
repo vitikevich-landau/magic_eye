@@ -81,14 +81,17 @@ void inspect(const T& obj, const std::string& label = "") {
     bool standalone = false;    // объект = одно значение (скаляр, строка)
     bool vector_mode = false;
 
-    if constexpr (d::described<T> || d::has_bases<T>) {
+    // Через model_of идут только типы со СВОИМ реестром (own_*): у наследника,
+    // лишь УНАСЛЕДОВАВШЕГО eye_describe/eye_bases, чужой реестр к нему неприменим
+    // — он честно уходит в «непрозрачный» (иначе карта соврала бы padding'ом).
+    if constexpr (d::own_described<T> || d::own_bases<T>) {
         d::ObjectModel model = d::model_of(obj);  // рекурсия по EYE_DESCRIBE/EYE_BASES
         fields = std::move(model.fields);
         bases  = std::move(model.bases);
         sites  = std::move(model.vptrs);
         vbase_offsets = std::move(model.vbase_ptrs);
         has_vbase = model.has_virtual_base;
-        src = d::has_bases<T> ? " · EYE_DESCRIBE + базы"
+        src = d::own_bases<T> ? " · EYE_DESCRIBE + базы"
                               : " · имена из EYE_DESCRIBE";
     } else if constexpr (std::is_same_v<T, std::string>) {
         fields.push_back(d::self_field(obj));
@@ -102,7 +105,10 @@ void inspect(const T& obj, const std::string& label = "") {
     } else if constexpr (d::is_std_array_v<T>) {
         fields = d::collect_array(obj);
         src = " · адаптер std::array";
-    } else if constexpr (std::is_class_v<T> && std::is_aggregate_v<T>) {
+    } else if constexpr (std::is_class_v<T> && std::is_aggregate_v<T> &&
+                         !d::described<T>) {
+        // Плоский агрегат без реестра (и без унаследованного — тот означает
+        // базу с полями, structured bindings его не разложат → в «непрозрачный»).
         if constexpr (d::field_count<T>() <= 8) {
             fields = d::collect(obj);
             src = " · агрегат (имена стёрты)";
@@ -110,15 +116,15 @@ void inspect(const T& obj, const std::string& label = "") {
             opaque = true;      // полей больше 8 — подними лимит visit_fields
         }
     } else if constexpr (std::is_class_v<T>) {
-        opaque = true;          // конструкторы/private/базы — нужен EYE_DESCRIBE
+        opaque = true;          // конструкторы/private/базы/чужой реестр — нужен EYE_DESCRIBE
     } else {
         fields.push_back(d::self_field(obj));   // скаляр или указатель
         standalone = true;
     }
 
-    // Полиморфный тип, НЕ прошедший через model_of (без реестра и без баз), —
+    // Полиморфный тип, НЕ прошедший через model_of (без своего реестра), —
     // один primary vptr. У прошедших через model_of сайты уже собраны.
-    if constexpr (std::is_polymorphic_v<T> && !d::described<T> && !d::has_bases<T>)
+    if constexpr (std::is_polymorphic_v<T> && !d::own_described<T> && !d::own_bases<T>)
         sites.push_back(d::read_vtable_site(obj, 0, d::type_name<T>()));
 
     std::vector<std::size_t> vptr_offsets;

@@ -28,7 +28,7 @@ class Circle : public Shape<Circle> {
 
 public:
     double area_impl() const { return 3.14159 * radius * radius; }
-    EYE_BASES(Shape<Circle>)
+    EYE_BASES(Circle, Shape<Circle>)
     EYE_DESCRIBE(Circle, radius)
 };
 
@@ -37,7 +37,7 @@ class Square : public Shape<Square> {
 
 public:
     double area_impl() const { return side * side; }
-    EYE_BASES(Shape<Square>)
+    EYE_BASES(Square, Shape<Square>)
     EYE_DESCRIBE(Square, side)
 };
 

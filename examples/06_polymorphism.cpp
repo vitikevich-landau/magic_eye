@@ -28,7 +28,7 @@ class CragHack : public Hero {
 
 public:
     void attack() const override { std::cout << "УДАР\n"; }
-    EYE_BASES(Hero)
+    EYE_BASES(CragHack, Hero)
     EYE_DESCRIBE(CragHack, rage)
 };
 

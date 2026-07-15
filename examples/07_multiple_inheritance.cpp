@@ -37,7 +37,7 @@ class Duck : public Swimmer, public Flyer {
 public:
     void swim() const override { std::cout << "гребёт лапами\n"; }
     void fly() const override  { std::cout << "машет крыльями\n"; }
-    EYE_BASES(Swimmer, Flyer)
+    EYE_BASES(Duck, Swimmer, Flyer)
     EYE_DESCRIBE(Duck, quack)
 };
 

@@ -14,34 +14,34 @@ struct BaseA { int a = 1; virtual ~BaseA() = default; EYE_DESCRIBE(BaseA, a) };
 struct BaseB { int b = 2; virtual ~BaseB() = default; EYE_DESCRIBE(BaseB, b) };
 struct Derived : BaseA, BaseB {
     int c = 3;
-    EYE_BASES(BaseA, BaseB)
+    EYE_BASES(Derived, BaseA, BaseB)
     EYE_DESCRIBE(Derived, c)
 };
 
 // --- ромб с общей virtual-базой ---------------------------------------------
 struct VBase { int soul = 7; virtual ~VBase() = default; EYE_DESCRIBE(VBase, soul) };
-struct Left  : virtual VBase { int l = 8; EYE_BASES(VBase) EYE_DESCRIBE(Left, l) };
-struct Right : virtual VBase { int r = 9; EYE_BASES(VBase) EYE_DESCRIBE(Right, r) };
+struct Left  : virtual VBase { int l = 8; EYE_BASES(Left, VBase) EYE_DESCRIBE(Left, l) };
+struct Right : virtual VBase { int r = 9; EYE_BASES(Right, VBase) EYE_DESCRIBE(Right, r) };
 struct Diamond : Left, Right {
     int d = 10;
-    EYE_BASES(Left, Right)
+    EYE_BASES(Diamond, Left, Right)
     EYE_DESCRIBE(Diamond, d)
 };
 
 // --- 3-уровневая НЕвиртуальная цепочка (регресс: база-в-базе на offset 0) -----
 struct GBase { int g = 1; EYE_DESCRIBE(GBase, g) };
-struct GMid : GBase { int mid = 2; EYE_BASES(GBase) EYE_DESCRIBE(GMid, mid) };
-struct GLeaf : GMid { int leaf = 3; EYE_BASES(GMid) EYE_DESCRIBE(GLeaf, leaf) };
+struct GMid : GBase { int mid = 2; EYE_BASES(GMid, GBase) EYE_DESCRIBE(GMid, mid) };
+struct GLeaf : GMid { int leaf = 3; EYE_BASES(GLeaf, GMid) EYE_DESCRIBE(GLeaf, leaf) };
 
 // --- повторяющаяся НЕвиртуальная база (два разных под-объекта одного типа) ----
 // Имя базы (Coin) НЕ префикс имён наследников — иначе подсчёт «из базы Coin»
 // поймал бы и «из базы RepL».
 struct Coin { int x = 5; EYE_DESCRIBE(Coin, x) };
-struct RepL : Coin { int rl = 6; EYE_BASES(Coin) EYE_DESCRIBE(RepL, rl) };
-struct RepR : Coin { int rr = 7; EYE_BASES(Coin) EYE_DESCRIBE(RepR, rr) };
+struct RepL : Coin { int rl = 6; EYE_BASES(RepL, Coin) EYE_DESCRIBE(RepL, rl) };
+struct RepR : Coin { int rr = 7; EYE_BASES(RepR, Coin) EYE_DESCRIBE(RepR, rr) };
 struct RepDerived : RepL, RepR {
     int rd = 8;
-    EYE_BASES(RepL, RepR)
+    EYE_BASES(RepDerived, RepL, RepR)
     EYE_DESCRIBE(RepDerived, rd)
 };
 
@@ -49,20 +49,20 @@ struct RepDerived : RepL, RepR {
 struct NPBase { int soul = 1; EYE_DESCRIBE(NPBase, soul) };
 struct NPDerived : virtual NPBase {
     int mana = 2;
-    EYE_BASES(NPBase)
+    EYE_BASES(NPDerived, NPBase)
     EYE_DESCRIBE(NPDerived, mana)
 };
 
 // --- EYE_BASES без своего EYE_DESCRIBE: унаследованный eye_describe() НЕ должен
 //     задвоить поля базы (поля приходят из рекурсии в базу) --------------------
 struct SoleBase { int val = 11; EYE_DESCRIBE(SoleBase, val) };
-struct NoOwnFields : SoleBase { EYE_BASES(SoleBase) };
+struct NoOwnFields : SoleBase { EYE_BASES(NoOwnFields, SoleBase) };
 
 // --- незарегистрированная ПЛОСКАЯ агрегатная база: её байты — поле, не padding -
 struct RawBase { int raw = 22; };  // без EYE_DESCRIBE
 struct WithRawBase : RawBase {
     int own = 33;
-    EYE_BASES(RawBase)
+    EYE_BASES(WithRawBase, RawBase)
     EYE_DESCRIBE(WithRawBase, own)
 };
 
@@ -72,6 +72,13 @@ struct WithRawBase : RawBase {
 //     объявлены нарочно. ---------------------------------------------------
 struct InhBase { int v = 44; EYE_DESCRIBE(InhBase, v) };
 struct InhChild : InhBase { int c = 55; };
+
+// --- регресс (Codex): унаследованный eye_bases() НЕ должен применяться к Leaf.
+//     RegLeaf наследует eye_bases() от RegMid, но своего EYE_BASES не объявлял —
+//     реестр Mid к нему неприменим, тип должен стать «непрозрачным». ---------
+struct RegBase { int rb = 1; EYE_DESCRIBE(RegBase, rb) };
+struct RegMid : RegBase { int rm = 2; EYE_BASES(RegMid, RegBase) EYE_DESCRIBE(RegMid, rm) };
+struct RegLeaf : RegMid { int rlf = 3; };  // без своих макросов
 
 namespace {
 
@@ -343,12 +350,20 @@ int main() {
                      raw.find("= 22") != std::string::npos,
                  "undescribed aggregate base rendered as padding, not fields");
 
-    // --- регресс (Codex): тип с УНАСЛЕДОВАННЫМ EYE_DESCRIBE + своим полем
-    //     обязан КОМПИЛИРОВАТЬСЯ (авторазбор не должен трогать агрегат-с-базой) -
+    // --- регресс (Codex): тип с лишь УНАСЛЕДОВАННЫМ EYE_DESCRIBE + своим полем
+    //     обязан компилироваться И трактоваться как НЕПРОЗРАЧНЫЙ (не пустая
+    //     карта с padding'ом — чужой реестр к нему неприменим) ------------------
     InhChild inh;
     const std::string inh_out = render_obj(inh, 126, "inh");
-    ok &= expect(!inh_out.empty() && inh_out.find("паспорт") != std::string::npos,
-                 "inherited-description aggregate failed to compile or render");
+    ok &= expect(inh_out.find("добавь EYE_DESCRIBE") != std::string::npos,
+                 "inherited-only description not treated as opaque");
+
+    // --- регресс (Codex): унаследованный eye_bases() не применяется к наследнику;
+    //     тип без своего EYE_BASES/EYE_DESCRIBE тоже непрозрачный (не падение) ---
+    RegLeaf reg_leaf;
+    const std::string leaf_out = render_obj(reg_leaf, 126, "regleaf");
+    ok &= expect(leaf_out.find("добавь EYE_DESCRIBE") != std::string::npos,
+                 "inherited eye_bases() was wrongly applied to derived");
 
     return ok ? 0 : 1;
 }
