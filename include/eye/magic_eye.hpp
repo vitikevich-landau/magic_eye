@@ -108,10 +108,13 @@ void inspect(const T& obj, const std::string& label = "") {
         fields = d::collect_array(obj);
         src = " · адаптер std::array";
     } else if constexpr (std::is_class_v<T> && std::is_aggregate_v<T> &&
+                         std::is_standard_layout_v<T> &&
                          !d::described<T> && !d::has_bases<T>) {
-        // Плоский агрегат без реестра. Исключены и described, и has_bases (в т.ч.
-        // УНАСЛЕДОВАННЫЕ): оба означают базу с полями, а агрегат «база + своё
-        // поле» structured bindings не разложат → такой тип уходит в непрозрачный.
+        // Плоский агрегат без реестра. Ключевое условие — standard-layout: у
+        // него все нестатические поля лежат в ОДНОМ классе, поэтому structured
+        // bindings гарантированно разложат его (это по стандарту). Агрегат с
+        // базой, где поля разбиты между базой и наследником, НЕ standard-layout
+        // → уходит в «непрозрачный», а не роняет компиляцию. Кроссплатформенно.
         if constexpr (d::field_count<T>() <= 8) {
             fields = d::collect(obj);
             src = " · агрегат (имена стёрты)";

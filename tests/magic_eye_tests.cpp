@@ -113,6 +113,12 @@ struct BasesOnlyL : BasesOnlyM { int x = 2; };                        // без 
 enum class Color : std::uint16_t { Red = 1, Green = 2, Blue = 4 };
 struct HasEnum { Color c = Color::Green; int n = 5; EYE_DESCRIBE(HasEnum, c, n) };
 
+// --- агрегат-с-базой БЕЗ макросов на верхнем уровне: НЕ standard-layout, не
+//     раскладывается structured bindings — должен компилироваться и быть
+//     непрозрачным, а не ронять сборку. -------------------------------------
+struct PlainBase2 { int pb = 1; };
+struct PlainDerived : PlainBase2 { int pd = 2; };
+
 namespace {
 
 struct LongNames {
@@ -427,6 +433,13 @@ int main() {
                      enum_out.find("(0x0002)") != std::string::npos &&
                      enum_out.find("c · ") != std::string::npos,
                  "enum field value/hex missing in render");
+
+    // --- регресс (Codex): агрегат-с-базой без макросов на верхнем уровне —
+    //     компилируется и непрозрачен (не structured-binding hard error) -------
+    PlainDerived plain;
+    const std::string plain_out = render_obj(plain, 126, "plain");
+    ok &= expect(plain_out.find("добавь EYE_DESCRIBE") != std::string::npos,
+                 "base-bearing aggregate not opaque (compile error / padding)");
 
     return ok ? 0 : 1;
 }
