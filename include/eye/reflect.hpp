@@ -368,6 +368,14 @@ std::string stringify(const FT& field) {
             s += (c < 0x20 || c == 0x7f) ? '.' : static_cast<char>(c);
         s += '"';
         return s;
+    } else if constexpr (std::is_enum_v<U>) {
+        // enum (в т.ч. scoped: он не printable и не integral) — показываем
+        // численное значение подлежащего типа; имя элемента без рефлексии не
+        // достать. Унарный + промотирует char-based underlying до int, иначе
+        // печатался бы глиф вместо числа.
+        std::ostringstream oss;
+        oss << +static_cast<std::underlying_type_t<U>>(field);
+        return oss.str();
     } else if constexpr (printable<U>) {
         std::ostringstream oss;
         if constexpr (std::is_same_v<U, bool>) oss << std::boolalpha;
@@ -387,10 +395,10 @@ void annotate(FieldInfo& fi, const FT& field) {
     using U = std::remove_cvref_t<FT>;
     fi.align = alignof(U);
 
-    if constexpr (std::is_integral_v<U> && !std::is_same_v<U, bool> &&
-                  sizeof(U) > 1) {
-        // Целое шире байта: рядом с десятичным значением пригодится hex —
-        // по нему видно little-endian в дампе (младший байт лежит первым).
+    if constexpr ((std::is_integral_v<U> || std::is_enum_v<U>) &&
+                  !std::is_same_v<U, bool> && sizeof(U) > 1) {
+        // Целое (или enum) шире байта: рядом с десятичным пригодится hex — по
+        // нему видно little-endian в дампе (младший байт лежит первым).
         fi.integral = true;
         char b[24];
         unsigned long long v = 0;

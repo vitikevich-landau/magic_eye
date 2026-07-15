@@ -106,9 +106,10 @@ void inspect(const T& obj, const std::string& label = "") {
         fields = d::collect_array(obj);
         src = " · адаптер std::array";
     } else if constexpr (std::is_class_v<T> && std::is_aggregate_v<T> &&
-                         !d::described<T>) {
-        // Плоский агрегат без реестра (и без унаследованного — тот означает
-        // базу с полями, structured bindings его не разложат → в «непрозрачный»).
+                         !d::described<T> && !d::has_bases<T>) {
+        // Плоский агрегат без реестра. Исключены и described, и has_bases (в т.ч.
+        // УНАСЛЕДОВАННЫЕ): оба означают базу с полями, а агрегат «база + своё
+        // поле» structured bindings не разложат → такой тип уходит в непрозрачный.
         if constexpr (d::field_count<T>() <= 8) {
             fields = d::collect(obj);
             src = " · агрегат (имена стёрты)";

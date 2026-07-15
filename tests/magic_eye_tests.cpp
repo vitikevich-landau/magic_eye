@@ -80,6 +80,17 @@ struct RegBase { int rb = 1; EYE_DESCRIBE(RegBase, rb) };
 struct RegMid : RegBase { int rm = 2; EYE_BASES(RegMid, RegBase) EYE_DESCRIBE(RegMid, rm) };
 struct RegLeaf : RegMid { int rlf = 3; };  // без своих макросов
 
+// --- регресс (Codex): наследник, унаследовавший eye_bases() от базы БЕЗ
+//     eye_describe(), обязан компилироваться (agg-fallback не должен трогать
+//     агрегат-с-базой) и быть непрозрачным. ---------------------------------
+struct BasesOnlyB { int bb = 1; };                                    // без макросов
+struct BasesOnlyM : BasesOnlyB { EYE_BASES(BasesOnlyM, BasesOnlyB) }; // только EYE_BASES
+struct BasesOnlyL : BasesOnlyM { int x = 2; };                        // без своих макросов
+
+// --- scoped enum: рендерится через underlying-значение, а не «—» ------------
+enum class Color : std::uint16_t { Red = 1, Green = 2, Blue = 4 };
+struct HasEnum { Color c = Color::Green; int n = 5; EYE_DESCRIBE(HasEnum, c, n) };
+
 namespace {
 
 struct LongNames {
@@ -364,6 +375,23 @@ int main() {
     const std::string leaf_out = render_obj(reg_leaf, 126, "regleaf");
     ok &= expect(leaf_out.find("добавь EYE_DESCRIBE") != std::string::npos,
                  "inherited eye_bases() was wrongly applied to derived");
+
+    // --- регресс (Codex): унаследованный eye_bases() без eye_describe() —
+    //     compile-safe + непрозрачный (agg-fallback не разбирает агрегат-с-базой)
+    BasesOnlyL bases_only;
+    const std::string bo_out = render_obj(bases_only, 126, "basesonly");
+    ok &= expect(bo_out.find("добавь EYE_DESCRIBE") != std::string::npos,
+                 "inherited-eye_bases-only type not treated as opaque");
+
+    // --- регресс (Codex): scoped enum рендерится через underlying, не «—» ------
+    ok &= expect(eye::detail::stringify(Color::Blue) == "4",
+                 "scoped enum not rendered through its underlying value");
+    HasEnum has_enum;
+    const std::string enum_out = render_obj(has_enum, 126, "enum");
+    ok &= expect(enum_out.find("= 2") != std::string::npos &&
+                     enum_out.find("(0x0002)") != std::string::npos &&
+                     enum_out.find("c · ") != std::string::npos,
+                 "enum field value/hex missing in render");
 
     return ok ? 0 : 1;
 }
