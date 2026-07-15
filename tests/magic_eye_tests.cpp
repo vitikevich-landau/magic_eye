@@ -53,6 +53,19 @@ struct NPDerived : virtual NPBase {
     EYE_DESCRIBE(NPDerived, mana)
 };
 
+// --- EYE_BASES без своего EYE_DESCRIBE: унаследованный eye_describe() НЕ должен
+//     задвоить поля базы (поля приходят из рекурсии в базу) --------------------
+struct SoleBase { int val = 11; EYE_DESCRIBE(SoleBase, val) };
+struct NoOwnFields : SoleBase { EYE_BASES(SoleBase) };
+
+// --- незарегистрированная ПЛОСКАЯ агрегатная база: её байты — поле, не padding -
+struct RawBase { int raw = 22; };  // без EYE_DESCRIBE
+struct WithRawBase : RawBase {
+    int own = 33;
+    EYE_BASES(RawBase)
+    EYE_DESCRIBE(WithRawBase, own)
+};
+
 namespace {
 
 struct LongNames {
@@ -309,6 +322,19 @@ int main() {
                  "virtual-base pointer of a non-polymorphic type mislabeled");
     ok &= expect(np.find("из базы NPBase") != std::string::npos,
                  "virtual base field missing for non-polymorphic derived");
+
+    // --- регресс (Codex): EYE_BASES без своего EYE_DESCRIBE — поле базы 1 раз ---
+    NoOwnFields no_own;
+    const std::string noown = render_obj(no_own, 126, "noown");
+    ok &= expect(count_occurrences(noown, "из базы SoleBase") == 1,
+                 "inherited eye_describe double-counted base fields");
+
+    // --- регресс (Codex): агрегатная база без EYE_DESCRIBE — поле, не padding ---
+    WithRawBase raw_obj;
+    const std::string raw = render_obj(raw_obj, 126, "raw");
+    ok &= expect(raw.find("из базы RawBase") != std::string::npos &&
+                     raw.find("= 22") != std::string::npos,
+                 "undescribed aggregate base rendered as padding, not fields");
 
     return ok ? 0 : 1;
 }

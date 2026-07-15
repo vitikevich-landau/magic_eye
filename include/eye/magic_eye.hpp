@@ -81,7 +81,7 @@ void inspect(const T& obj, const std::string& label = "") {
     bool standalone = false;    // объект = одно значение (скаляр, строка)
     bool vector_mode = false;
 
-    if constexpr (d::described<T>) {
+    if constexpr (d::described<T> || d::has_bases<T>) {
         d::ObjectModel model = d::model_of(obj);  // рекурсия по EYE_DESCRIBE/EYE_BASES
         fields = std::move(model.fields);
         bases  = std::move(model.bases);
@@ -116,8 +116,9 @@ void inspect(const T& obj, const std::string& label = "") {
         standalone = true;
     }
 
-    // Полиморфный тип без реестра (или агрегат-с-virtual) — один primary vptr.
-    if constexpr (std::is_polymorphic_v<T> && !d::described<T>)
+    // Полиморфный тип, НЕ прошедший через model_of (без реестра и без баз), —
+    // один primary vptr. У прошедших через model_of сайты уже собраны.
+    if constexpr (std::is_polymorphic_v<T> && !d::described<T> && !d::has_bases<T>)
         sites.push_back(d::read_vtable_site(obj, 0, d::type_name<T>()));
 
     std::vector<std::size_t> vptr_offsets;

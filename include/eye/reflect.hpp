@@ -145,9 +145,18 @@ void visit_fields(const T& obj, F&& f) {
 template <class V>
 concept printable = requires(std::ostream& os, const V& v) { os << v; };
 
-// Есть ли реестр EYE_DESCRIBE (M4)?
+// Есть ли реестр EYE_DESCRIBE (M4)? (в т.ч. УНАСЛЕДОВАННЫЙ от базы —
+// eye_describe() статическая, имя находится и по наследству.)
 template <class T>
 concept described = requires { T::eye_describe(); };
+
+// Реестр объявлен в САМОМ T, а не подхвачен от базы. EYE_DESCRIBE ставит
+// `using Self = Type;`, поэтому у наследника без своего EYE_DESCRIBE T::Self
+// указывает на базу. Без этой проверки поля базы добавились бы дважды: один
+// раз при рекурсии в базу, второй — через унаследованный eye_describe().
+template <class T>
+concept own_described =
+    described<T> && requires { requires std::is_same_v<typename T::Self, T>; };
 
 // Агрегат, который Око умеет разбирать автоматически (M2)?
 template <class T>
@@ -572,6 +581,31 @@ std::vector<FieldInfo> collect(const T& obj) {
     return fields;
 }
 
+// То же, что авторазбор, но с offset'ами от md_base и меткой владельца — для
+// НЕзарегистрированной агрегатной базы (у неё нет своего EYE_DESCRIBE, но байты
+// нельзя выдавать за padding). Нумеруем поля #0, #1, … внутри этой базы.
+template <class T>
+void append_aggregate(const T& obj, const unsigned char* md_base,
+                      const std::string& owner, int depth,
+                      std::vector<FieldInfo>& out) {
+    std::size_t idx = 0;
+    visit_fields(obj, [&](const auto& field) {
+        using FT = std::remove_cvref_t<decltype(field)>;
+        FieldInfo fi;
+        fi.name   = "#" + std::to_string(idx++);
+        fi.offset = static_cast<std::size_t>(
+            reinterpret_cast<const unsigned char*>(std::addressof(field)) -
+            md_base);
+        fi.size  = sizeof(field);
+        fi.type  = type_name<FT>();
+        fi.value = stringify<FT>(field);
+        fi.owner = owner;
+        fi.base_depth = depth;
+        annotate<FT>(fi, field);
+        out.push_back(std::move(fi));
+    });
+}
+
 // Элементы std::array — как поля #0, #1, … Все лежат ВНУТРИ объекта подряд
 // (offset i*sizeof(E)), кучи нет. type/value/аннотации — как у обычного поля.
 template <class E, std::size_t N>
@@ -711,9 +745,20 @@ void gather(const T& obj, ObjectModel& m, const unsigned char* md_base,
         }
     }
 
-    // 3) собственные поля T (offset'ы от md_base).
-    if constexpr (described<T>)
+    // 3) собственные поля T (offset'ы от md_base). Только СВОЙ реестр — иначе
+    //    у наследника без своего EYE_DESCRIBE подхватился бы унаследованный
+    //    eye_describe() и поля базы задвоились бы (их уже собрала рекурсия в п.2).
+    if constexpr (own_described<T>) {
         append_described<T>(obj, md_base, type_name<T>(), depth, m.fields);
+    } else if constexpr (std::is_aggregate_v<T> && !has_bases<T> &&
+                         !is_std_array_v<T> && !is_std_vector_v<T>) {
+        // Незарегистрированная ПЛОСКАЯ агрегатная база: разбираем автоматикой,
+        // чтобы её байты не оказались «padding — мусор». (>8 полей — скрываем.)
+        // has_bases исключён: агрегат со СВОИМИ базами structured bindings не
+        // раскладывают — такой базе нужен свой EYE_BASES/EYE_DESCRIBE.
+        if constexpr (field_count<T>() <= 8)
+            append_aggregate<T>(obj, md_base, type_name<T>(), depth, m.fields);
+    }
 }
 
 template <class T>
