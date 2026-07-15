@@ -58,12 +58,34 @@ struct NPDerived : virtual NPBase {
 struct SoleBase { int val = 11; EYE_DESCRIBE(SoleBase, val) };
 struct NoOwnFields : SoleBase { EYE_BASES(NoOwnFields, SoleBase) };
 
-// --- незарегистрированная ПЛОСКАЯ агрегатная база: её байты — поле, не padding -
+// --- незарегистрированная база: её байты помечаются СКРЫТЫМИ, не padding'ом ---
 struct RawBase { int raw = 22; };  // без EYE_DESCRIBE
 struct WithRawBase : RawBase {
     int own = 33;
     EYE_BASES(WithRawBase, RawBase)
     EYE_DESCRIBE(WithRawBase, own)
+};
+
+// --- НЕагрегатная (private + ctor) непрозрачная база — байты скрыты, не padding
+class PrivBase {
+    int hidden = 1;
+public:
+    PrivBase() = default;
+};
+struct WithPrivBase : PrivBase {
+    int own = 44;
+    EYE_BASES(WithPrivBase, PrivBase)
+    EYE_DESCRIBE(WithPrivBase, own)
+};
+
+// --- база-агрегат СО СВОЕЙ базой + полем: не разлагается structured bindings;
+//     раньше валила компиляцию, теперь помечается скрытой ----------------------
+struct DeepBase { int d = 1; };
+struct DeepMid : DeepBase { int m = 2; };      // агрегат с базой + своим полем
+struct DeepTop : DeepMid {
+    int t = 3;
+    EYE_BASES(DeepTop, DeepMid)
+    EYE_DESCRIBE(DeepTop, t)
 };
 
 // --- регресс (Codex): наследник, лишь УНАСЛЕДОВАВШИЙ EYE_DESCRIBE + своё поле.
@@ -354,12 +376,25 @@ int main() {
     ok &= expect(count_occurrences(noown, "из базы SoleBase") == 1,
                  "inherited eye_describe double-counted base fields");
 
-    // --- регресс (Codex): агрегатная база без EYE_DESCRIBE — поле, не padding ---
+    // --- регресс (Codex): база без EYE_DESCRIBE → байты СКРЫТЫ, не padding ------
     WithRawBase raw_obj;
     const std::string raw = render_obj(raw_obj, 126, "raw");
-    ok &= expect(raw.find("из базы RawBase") != std::string::npos &&
-                     raw.find("= 22") != std::string::npos,
-                 "undescribed aggregate base rendered as padding, not fields");
+    ok &= expect(raw.find("непрозрачная база «RawBase»") != std::string::npos &&
+                     raw.find("= 33") != std::string::npos,
+                 "undescribed base bytes not marked opaque (shown as padding)");
+
+    // Непрозрачная (private+ctor, неагрегатная) база — тоже скрытые байты.
+    WithPrivBase priv_obj;
+    const std::string priv = render_obj(priv_obj, 126, "priv");
+    ok &= expect(priv.find("непрозрачная база «PrivBase»") != std::string::npos,
+                 "non-aggregate opaque base not marked opaque");
+
+    // Агрегат-со-своей-базой как база: должен КОМПИЛИРОВАТЬСЯ и быть скрытым.
+    DeepTop deep_obj;
+    const std::string deep = render_obj(deep_obj, 126, "deep");
+    ok &= expect(deep.find("непрозрачная база «DeepMid»") != std::string::npos &&
+                     deep.find("= 3") != std::string::npos,
+                 "aggregate-with-own-base failed to compile or not opaque");
 
     // --- регресс (Codex): тип с лишь УНАСЛЕДОВАННЫМ EYE_DESCRIBE + своим полем
     //     обязан компилироваться И трактоваться как НЕПРОЗРАЧНЫЙ (не пустая

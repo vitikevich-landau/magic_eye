@@ -74,6 +74,7 @@ void inspect(const T& obj, const std::string& label = "") {
     std::vector<d::BaseInfo>   bases;    // под-объекты баз (EYE_BASES)
     std::vector<d::VtableSite> sites;    // vptr-сайты (у MI их несколько)
     std::vector<std::size_t>   vbase_offsets;  // служебные указатели на vbase
+    std::vector<d::OpaqueSpan> opaque_bases;   // под-объекты неразобранных баз
     bool has_vbase = false;              // есть ли virtual-база (ромб)
     d::VectorInfo vector;
     std::string src;            // откуда взялись имена — приписка к заголовку
@@ -90,6 +91,7 @@ void inspect(const T& obj, const std::string& label = "") {
         bases  = std::move(model.bases);
         sites  = std::move(model.vptrs);
         vbase_offsets = std::move(model.vbase_ptrs);
+        opaque_bases = std::move(model.opaque_bases);
         has_vbase = model.has_virtual_base;
         src = d::own_bases<T> ? " · EYE_DESCRIBE + базы"
                               : " · имена из EYE_DESCRIBE";
@@ -141,7 +143,7 @@ void inspect(const T& obj, const std::string& label = "") {
     d::frame_sep("память · объект @ " + d::hexptr(&obj) + src);
     d::render_memory(fields, sizeof(T), alignof(T), vptr_offsets, vbase_offsets,
                      &obj, opaque, standalone,
-                     vector_mode ? &vector : nullptr);
+                     vector_mode ? &vector : nullptr, opaque_bases);
 
     // --- vtable для полиморфных (у множественного наследования — несколько) ---
     if (!sites.empty()) {

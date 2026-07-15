@@ -599,31 +599,6 @@ std::vector<FieldInfo> collect(const T& obj) {
     return fields;
 }
 
-// То же, что авторазбор, но с offset'ами от md_base и меткой владельца — для
-// НЕзарегистрированной агрегатной базы (у неё нет своего EYE_DESCRIBE, но байты
-// нельзя выдавать за padding). Нумеруем поля #0, #1, … внутри этой базы.
-template <class T>
-void append_aggregate(const T& obj, const unsigned char* md_base,
-                      const std::string& owner, int depth,
-                      std::vector<FieldInfo>& out) {
-    std::size_t idx = 0;
-    visit_fields(obj, [&](const auto& field) {
-        using FT = std::remove_cvref_t<decltype(field)>;
-        FieldInfo fi;
-        fi.name   = "#" + std::to_string(idx++);
-        fi.offset = static_cast<std::size_t>(
-            reinterpret_cast<const unsigned char*>(std::addressof(field)) -
-            md_base);
-        fi.size  = sizeof(field);
-        fi.type  = type_name<FT>();
-        fi.value = stringify<FT>(field);
-        fi.owner = owner;
-        fi.base_depth = depth;
-        annotate<FT>(fi, field);
-        out.push_back(std::move(fi));
-    });
-}
-
 // Элементы std::array — как поля #0, #1, … Все лежат ВНУТРИ объекта подряд
 // (offset i*sizeof(E)), кучи нет. type/value/аннотации — как у обычного поля.
 template <class E, std::size_t N>
@@ -687,11 +662,22 @@ VtableSite read_vtable_site(const T& obj, std::size_t offset,
 //  Модель объекта: поля (свои + унаследованные), под-объекты баз, vptr-сайты.
 //  Собирается РЕКУРСИВНО по реестрам EYE_DESCRIBE/EYE_BASES.
 // ════════════════════════════════════════════════════════════════════════════
+// Диапазон под-объекта НЕразобранной базы (нет своего EYE_DESCRIBE): её байты
+// нельзя выдавать за padding — помечаем как «скрытое». size = sizeof базы;
+// перекрытие с соседями и вложенными полями вид разрешает сам (закрашивает
+// только НЕпокрытые байты этого диапазона).
+struct OpaqueSpan {
+    std::size_t offset = 0;
+    std::size_t size = 0;
+    std::string name;   // имя базы — для подписи
+};
+
 struct ObjectModel {
     std::vector<FieldInfo>  fields;      // все поля с АБСОЛЮТНЫМИ offset'ами
     std::vector<BaseInfo>   bases;       // под-объекты баз (метки/иерархия)
     std::vector<VtableSite> vptrs;       // все vptr-сайты (у MI их несколько)
     std::vector<std::size_t> vbase_ptrs; // служебные указатели на virtual-базу
+    std::vector<OpaqueSpan> opaque_bases;// под-объекты неразобранных баз
     bool has_virtual_base = false;       // есть ли хоть одна virtual-база (ромб)
 };
 
@@ -745,6 +731,13 @@ void gather(const T& obj, ObjectModel& m, const unsigned char* md_base,
                     if (!bi.shared) {
                         if (bi.virtual_base)
                             seen.push_back(static_cast<const void*>(baddr));
+                        // База без своего EYE_DESCRIBE не даёт полей для СВОЕГО
+                        // хранилища → помечаем её под-объект скрытым, чтобы вид
+                        // не выдал байты за padding. (Свои под-базы, если есть,
+                        // соберёт рекурсия; вид закрасит только непокрытое.)
+                        if constexpr (!own_described<B>)
+                            m.opaque_bases.push_back(
+                                {bi.offset, sizeof(B), type_name<B>()});
                         gather<B>(b, m, md_base, depth + 1, seen);
                     }
                 }(tag));
@@ -767,20 +760,12 @@ void gather(const T& obj, ObjectModel& m, const unsigned char* md_base,
     // 3) собственные поля T (offset'ы от md_base). Только СВОЙ реестр — иначе
     //    у наследника без своего EYE_DESCRIBE подхватился бы унаследованный
     //    eye_describe() и поля базы задвоились бы (их уже собрала рекурсия в п.2).
-    if constexpr (own_described<T>) {
+    //    Незарегистрированную базу НЕ разбираем автоматикой: structured bindings
+    //    ill-formed для агрегата «база + своё поле», а надёжно отличить плоский
+    //    агрегат от агрегата-с-базой на этапе компиляции нельзя. Её байты уже
+    //    помечены скрытыми (opaque_bases в п.2) — честнее, чем разложить наугад.
+    if constexpr (own_described<T>)
         append_described<T>(obj, md_base, type_name<T>(), depth, m.fields);
-    } else if constexpr (std::is_aggregate_v<T> && !described<T> &&
-                         !has_bases<T> && !is_std_array_v<T> &&
-                         !is_std_vector_v<T>) {
-        // Незарегистрированная ПЛОСКАЯ агрегатная база: разбираем автоматикой,
-        // чтобы её байты не оказались «padding — мусор». (>8 полей — скрываем.)
-        // Исключены: !described — тип, лишь УНАСЛЕДОВАВШИЙ eye_describe (у него
-        // есть база с полями → structured bindings не разложат «база + своё
-        // поле»); !has_bases — базы разбираются рекурсией в п.2. Такому типу
-        // нужен свой EYE_BASES/EYE_DESCRIBE.
-        if constexpr (field_count<T>() <= 8)
-            append_aggregate<T>(obj, md_base, type_name<T>(), depth, m.fields);
-    }
 }
 
 template <class T>

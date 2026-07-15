@@ -514,7 +514,37 @@ inline std::vector<Region> build_regions(const std::vector<FieldInfo>& fields,
                                          const std::vector<std::size_t>& vptr_offsets,
                                          const std::vector<std::size_t>& vbase_offsets,
                                          bool opaque,
-                                         const std::string& opaque_why = "") {
+                                         const std::string& opaque_why = "",
+                                         const std::vector<OpaqueSpan>& opaque_spans = {}) {
+    // Дыра [start, start+size): весь объект непрозрачен (vector) → opaque;
+    // иначе если старт попал в под-объект неразобранной базы → opaque с её
+    // именем (закрашиваем только НЕпокрытые байты — сами регионы уже размещены);
+    // иначе честный padding с причиной от следующего региона.
+    auto classify_gap = [&](std::size_t start, std::size_t size,
+                            const Region* next) -> Region {
+        if (opaque) { Region p{Region::R::opaque, start, size}; p.why = opaque_why; return p; }
+        const OpaqueSpan* owner = nullptr;
+        for (const OpaqueSpan& s : opaque_spans)
+            if (start >= s.offset && start < s.offset + s.size)
+                if (owner == nullptr || s.offset > owner->offset) owner = &s;  // глубже
+        if (owner != nullptr) {
+            Region p{Region::R::opaque, start, size};
+            p.why = "непрозрачная база «" + clip(owner->name, 20) +
+                    "» — нужен EYE_DESCRIBE";
+            return p;
+        }
+        Region p{Region::R::padding, start, size};
+        if (next == nullptr)
+            p.why = "добивка sizeof до кратного выравниванию";
+        else if (next->what == Region::R::vptr)
+            p.why = "выравнивание под vptr под-объекта";
+        else if (next->what == Region::R::vbase)
+            p.why = "выравнивание под указатель virtual-базы";
+        else if (next->f != nullptr)
+            p.why = clip(next->f->name, 12) + " требует адрес, кратный " +
+                    std::to_string(next->f->align);
+        return p;
+    };
     // 1) Все «занятые» регионы: vptr-сайты + указатели vbase + поля (сплит строк).
     std::vector<Region> placed;
     for (std::size_t off : vptr_offsets)
@@ -542,32 +572,13 @@ inline std::vector<Region> build_regions(const std::vector<FieldInfo>& fields,
     std::vector<Region> rs;
     std::size_t cursor = 0;
     for (const Region& r : placed) {
-        if (r.off > cursor && r.off <= total) {      // дыра перед регионом
-            Region p{opaque ? Region::R::opaque : Region::R::padding,
-                     cursor, r.off - cursor};
-            if (opaque)
-                p.why = opaque_why;
-            else if (r.what == Region::R::vptr)
-                p.why = "выравнивание под vptr под-объекта";
-            else if (r.what == Region::R::vbase)
-                p.why = "выравнивание под указатель virtual-базы";
-            else if (r.f != nullptr)
-                p.why = clip(r.f->name, 12) + " требует адрес, кратный " +
-                        std::to_string(r.f->align);
-            rs.push_back(p);
-        }
+        if (r.off > cursor && r.off <= total)        // дыра перед регионом
+            rs.push_back(classify_gap(cursor, r.off - cursor, &r));
         rs.push_back(r);
         if (r.off + r.size > cursor) cursor = r.off + r.size;
     }
-    if (opaque && cursor < total) {
-        Region hidden{Region::R::opaque, cursor, total - cursor};
-        hidden.why = opaque_why;
-        rs.push_back(hidden);
-    } else if (cursor < total) {
-        Region p{Region::R::padding, cursor, total - cursor};
-        p.why = "добивка sizeof до кратного выравниванию";
-        rs.push_back(p);
-    }
+    if (cursor < total)                              // хвостовая дыра
+        rs.push_back(classify_gap(cursor, total - cursor, nullptr));
     return rs;
 }
 
@@ -742,16 +753,17 @@ inline std::vector<Line> region_notes(const Region& r, const unsigned char* base
             break;
         }
         case Region::R::opaque: {
-            Line l1;
-            l1.col(clr::grey(), r.why.empty()
-                                    ? "поля скрыты: private/конструкторы"
-                                    : "служебная часть std::vector");
-            Line l2 = range_note(r);
-            Line l3;
-            l3.col(clr::grey(), r.why.empty()
-                                    ? "добавь EYE_DESCRIBE — Око увидит"
-                                    : clip(r.why, budget));
-            out = {l1, l2, l3};
+            if (r.why.empty()) {   // непрозрачный класс целиком
+                Line l1; l1.col(clr::grey(), "поля скрыты: private/конструкторы");
+                Line l2 = range_note(r);
+                Line l3; l3.col(clr::grey(), "добавь EYE_DESCRIBE — Око увидит");
+                out = {l1, l2, l3};
+            } else {               // база без реестра / служебная часть std-типа
+                Line l1; l1.col(clr::grey(), "скрытые байты");
+                Line l2 = range_note(r);
+                Line l3; l3.col(clr::grey(), clip(r.why, budget));
+                out = {l1, l2, l3};
+            }
             break;
         }
         case Region::R::field: {
@@ -879,7 +891,8 @@ inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
                           const std::vector<std::size_t>& vptr_offsets,
                           const std::vector<std::size_t>& vbase_offsets,
                           const void* addr, bool opaque, bool standalone,
-                          const VectorInfo* vector = nullptr) {
+                          const VectorInfo* vector = nullptr,
+                          const std::vector<OpaqueSpan>& opaque_spans = {}) {
     const bool poly = !vptr_offsets.empty();
     const auto* base = static_cast<const unsigned char*>(addr);
     // Реестр мог перечислить поля не по порядку — сортируем по offset, иначе
@@ -888,11 +901,16 @@ inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
               [](const FieldInfo& a, const FieldInfo& b) {
                   return a.offset < b.offset;
               });
+    // Наследование (поля из баз или скрытые базы): совет по перестановке полей
+    // неприменим — между базами поля не переставить.
+    const bool inherited = !opaque_spans.empty() ||
+        std::any_of(fields.begin(), fields.end(),
+                    [](const FieldInfo& f) { return f.base_depth > 0; });
     const std::string opaque_why = vector == nullptr
         ? ""
         : "роль зависит от STL и режима Debug/Release";
     const auto regions = build_regions(fields, total, vptr_offsets, vbase_offsets,
-                                       opaque, opaque_why);
+                                       opaque, opaque_why, opaque_spans);
     const bool gutter = geo().gutter;
 
     bool has_pad = false, has_vptr = false, has_field = false, has_op = false,
@@ -1093,8 +1111,9 @@ inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
 
     // --- совет по перестановке (привет, pahole) --------------------------------
     // При virtual-базе указатель vbase — обязательная служебная ячейка, её
-    // перестановкой полей не убрать, поэтому совет тогда не выдаём.
-    if (np > 0 && !poly && !opaque && fields.size() > 1 && vbase_offsets.empty()) {
+    // перестановкой не убрать; при наследовании поля разных баз не переставить.
+    if (np > 0 && !poly && !opaque && fields.size() > 1 &&
+        vbase_offsets.empty() && !inherited) {
         auto sorted = fields;
         std::sort(sorted.begin(), sorted.end(),
                   [](const FieldInfo& a, const FieldInfo& b) {
