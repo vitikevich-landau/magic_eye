@@ -750,12 +750,15 @@ void gather(const T& obj, ObjectModel& m, const unsigned char* md_base,
     //    eye_describe() и поля базы задвоились бы (их уже собрала рекурсия в п.2).
     if constexpr (own_described<T>) {
         append_described<T>(obj, md_base, type_name<T>(), depth, m.fields);
-    } else if constexpr (std::is_aggregate_v<T> && !has_bases<T> &&
-                         !is_std_array_v<T> && !is_std_vector_v<T>) {
+    } else if constexpr (std::is_aggregate_v<T> && !described<T> &&
+                         !has_bases<T> && !is_std_array_v<T> &&
+                         !is_std_vector_v<T>) {
         // Незарегистрированная ПЛОСКАЯ агрегатная база: разбираем автоматикой,
         // чтобы её байты не оказались «padding — мусор». (>8 полей — скрываем.)
-        // has_bases исключён: агрегат со СВОИМИ базами structured bindings не
-        // раскладывают — такой базе нужен свой EYE_BASES/EYE_DESCRIBE.
+        // Исключены: !described — тип, лишь УНАСЛЕДОВАВШИЙ eye_describe (у него
+        // есть база с полями → structured bindings не разложат «база + своё
+        // поле»); !has_bases — базы разбираются рекурсией в п.2. Такому типу
+        // нужен свой EYE_BASES/EYE_DESCRIBE.
         if constexpr (field_count<T>() <= 8)
             append_aggregate<T>(obj, md_base, type_name<T>(), depth, m.fields);
     }

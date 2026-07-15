@@ -66,6 +66,13 @@ struct WithRawBase : RawBase {
     EYE_DESCRIBE(WithRawBase, own)
 };
 
+// --- регресс (Codex): наследник, лишь УНАСЛЕДОВАВШИЙ EYE_DESCRIBE + своё поле.
+//     Агрегат «база + своё поле» structured bindings не разложат — авторазбор
+//     на нём НЕ должен запускаться (иначе не компилируется). Свои макросы не
+//     объявлены нарочно. ---------------------------------------------------
+struct InhBase { int v = 44; EYE_DESCRIBE(InhBase, v) };
+struct InhChild : InhBase { int c = 55; };
+
 namespace {
 
 struct LongNames {
@@ -335,6 +342,13 @@ int main() {
     ok &= expect(raw.find("из базы RawBase") != std::string::npos &&
                      raw.find("= 22") != std::string::npos,
                  "undescribed aggregate base rendered as padding, not fields");
+
+    // --- регресс (Codex): тип с УНАСЛЕДОВАННЫМ EYE_DESCRIBE + своим полем
+    //     обязан КОМПИЛИРОВАТЬСЯ (авторазбор не должен трогать агрегат-с-базой) -
+    InhChild inh;
+    const std::string inh_out = render_obj(inh, 126, "inh");
+    ok &= expect(!inh_out.empty() && inh_out.find("паспорт") != std::string::npos,
+                 "inherited-description aggregate failed to compile or render");
 
     return ok ? 0 : 1;
 }
