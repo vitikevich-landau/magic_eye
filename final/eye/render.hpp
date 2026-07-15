@@ -655,7 +655,8 @@ inline void pointer_notes(std::vector<Line>& out, const FieldInfo& f,
     }
     const auto b = reinterpret_cast<std::uintptr_t>(base);
     const auto t = reinterpret_cast<std::uintptr_t>(f.target);
-    if (t >= b && t < b + total) {
+    const bool inside = t >= b && t < b + total;
+    if (inside) {
         Line l;
         l.col(clr::gold(), "↩ этот объект: база+" +
                                hex4(static_cast<std::size_t>(t - b)));
@@ -670,9 +671,17 @@ inline void pointer_notes(std::vector<Line>& out, const FieldInfo& f,
         l.col(clr::grey(), "по адресу лежит: ")
          .col(clr::green(), clip(f.pointee, budget > 17 ? budget - 17 : 0));
         out.push_back(l);
-    } else {
+    } else if (inside) {
+        // Цель — внутри осматриваемого объекта: её байты уже видны в дампе
+        // выше, читать нечего. Про валидность речи нет (это тот же объект).
         Line l;
-        l.col(clr::grey(), "цель не читаем: адрес может быть невалиден");
+        l.col(clr::grey(), clip("цель в этом объекте — байты видны выше", budget));
+        out.push_back(l);
+    } else {
+        // Внешний адрес: инспектор намеренно НЕ разыменовывает чужую память
+        // (она может быть висячей), поэтому показывает только адрес.
+        Line l;
+        l.col(clr::grey(), clip("цель не читаем: адрес может быть невалиден", budget));
         out.push_back(l);
     }
 }
