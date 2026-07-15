@@ -10,6 +10,7 @@
 //     detail/palette.hpp    ← ANSI-палитра clr:: (авто-выкл вне терминала)
 //     detail/geometry.hpp   ← раскладка: зоны, ширина, geo_refresh
 //     detail/text.hpp       ← ширина/clip/hex + строитель Line
+//     detail/surface.hpp    ← шов: строки вида в буфер (TUI/тест) или в cout
 //     detail/frame.hpp      ← рамки: put, две зоны, картуш, разделители
 //     detail/view_passport.hpp   ← паспорт: размер + черты
 //     detail/view_memory.hpp     ← СХЕМА ПАМЯТИ (сердце): карта ║ кодекс, шкала

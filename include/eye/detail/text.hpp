@@ -82,6 +82,21 @@ inline std::string clip_ansi(const std::string& s, std::size_t maxcp) {
     return out;
 }
 
+// Видимая ширина УЖЕ собранной строки с ANSI-кодами: CSI-последовательности
+// не занимают колонок, остальное считается кодовыми точками (как vwidth).
+inline std::size_t vwidth_ansi(const std::string& s) {
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < s.size();) {
+        if (s[i] == '\033' && i + 1 < s.size() && s[i + 1] == '[') {
+            const std::size_t end = s.find('m', i + 2);
+            if (end != std::string::npos) { i = end + 1; continue; }
+        }
+        if ((static_cast<unsigned char>(s[i]) & 0xC0) != 0x80) ++n;
+        ++i;
+    }
+    return n;
+}
+
 inline std::string ljust(std::string s, std::size_t w) {
     const std::size_t v = vwidth(s);
     if (v < w) s.append(w - v, ' ');

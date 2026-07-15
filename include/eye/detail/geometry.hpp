@@ -42,6 +42,19 @@ struct Geo {
 inline Geo& geo() { static Geo g; return g; }
 inline std::size_t frame_width() { return geo().frame_w; }
 
+// RAII: временно подменить геометрию (TUI рисует секции в зону произвольной
+// ширины и без центрирования — margin у него свой, экранный).
+class GeoScope {
+public:
+    explicit GeoScope(const Geo& g) : saved_(geo()) { geo() = g; }
+    GeoScope(const GeoScope&) = delete;
+    GeoScope& operator=(const GeoScope&) = delete;
+    ~GeoScope() { geo() = saved_; }
+
+private:
+    Geo saved_;
+};
+
 #if defined(_WIN32)
 // «Во весь экран, как в игре»: при первом выводе разворачиваем окно консоли на
 // максимально возможный для текущего шрифта размер. Обычный conhost это умеет;

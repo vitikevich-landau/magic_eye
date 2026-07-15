@@ -56,7 +56,7 @@ void inspect(const T& obj, const std::string& label = "") {
     d::geo_refresh();   // ширина терминала могла измениться между панелями
     const std::string title = label.empty() ? d::type_name<T>() : label;
 
-    std::cout << '\n';
+    d::emit_line("");   // воздух перед панелью (через шов Surface)
     d::frame_top(title);
     if (!label.empty()) {  // подпись задана — покажем ещё и настоящий тип
         d::Line l;
@@ -168,7 +168,7 @@ void inspect(const T& obj, const std::string& label = "") {
     // --- спутники: буферы строк, живущие в куче (НЕ внутри объекта) ------------
     d::render_satellites(fields, &obj);
     if (vector_mode) d::render_vector_satellite(vector, &obj);
-    std::cout << '\n';
+    d::emit_line("");
 }
 
 // Осмотр типа без объекта: только то, что известно на этапе компиляции.
@@ -176,7 +176,7 @@ template <class T>
 void inspect() {
     namespace d = detail;
     d::geo_refresh();
-    std::cout << '\n';
+    d::emit_line("");
     d::frame_top(d::type_name<T>() + "  · статика");
     d::frame_sep("паспорт");
     d::render_passport(d::passport_of<T>());
@@ -184,7 +184,7 @@ void inspect() {
         d::put_text("полей: " + std::to_string(d::field_count<T>()));
     d::put_text("объекта нет → значений, offset'ов и байтов нет");
     d::frame_bottom();
-    std::cout << '\n';
+    d::emit_line("");
 }
 
 } // namespace eye

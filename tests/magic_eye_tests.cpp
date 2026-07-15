@@ -300,6 +300,34 @@ int main() {
     ok &= expect(lines_fit(hostile, 126),
                  "control characters broke the frame geometry");
 
+    // --- шов Surface: с активным Surface строки копятся, cout молчит,
+    //     а склейка буфера совпадает с прямой печатью байт-в-байт ------------
+    {
+        set_env("EYE_WIDTH", "126");
+        LongNames value;
+        const std::string direct = render_obj(value, 126, "surface");
+        eye::detail::Surface surface;
+        std::ostringstream leak;
+        std::streambuf* prev = std::cout.rdbuf(leak.rdbuf());
+        {
+            eye::detail::SurfaceScope scope(surface);
+            eye::inspect(value, "surface");
+        }
+        std::cout.rdbuf(prev);
+        ok &= expect(leak.str().empty(),
+                     "surface capture leaked lines to std::cout");
+        ok &= expect(!surface.lines.empty(), "surface captured no lines");
+        std::string joined;
+        for (const eye::detail::StyledLine& l : surface.lines) {
+            joined += l.s;
+            joined += '\n';
+            ok &= expect(l.w == eye::detail::vwidth_ansi(l.s),
+                         "styled line width is stale");
+        }
+        ok &= expect(joined == direct,
+                     "surface lines differ from direct inspect output");
+    }
+
     // Ненулевой адрес заведомо нельзя разыменовывать. Тест проходит, если
     // inspect() лишь выводит адрес и не падает на попытке прочитать int.
     int* invalid = reinterpret_cast<int*>(static_cast<std::uintptr_t>(1));

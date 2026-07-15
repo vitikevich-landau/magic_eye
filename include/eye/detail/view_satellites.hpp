@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cstddef>
 #include <string>
+#include <utility>
 #include <vector>
 #include "field_mark.hpp"   // add_field_mark — общий со схемой памяти
 #include "frame.hpp"
@@ -13,6 +14,7 @@ namespace eye::detail {
 // ════════════════════════════════════════════════════════════════════════════
 //  Панели-спутники: буферы std::string и массивы std::vector, живущие в куче.
 //  Печатаются ПОСЛЕ главной панели — внешняя память правда «где-то ещё».
+//  Строки уходят через emit_line (шов Surface) — как и рамочные строки frame.
 // ════════════════════════════════════════════════════════════════════════════
 inline void render_satellites(const std::vector<FieldInfo>& fields,
                               const void* addr) {
@@ -29,7 +31,7 @@ inline void render_satellites(const std::vector<FieldInfo>& fields,
                 (fields[i].offset == f.offset && i < field_i))
                 ++field_no;
         // Стрелка-связка от главной панели к спутнику.
-        std::cout << ind << clr::grey() << "│" << clr::reset() << '\n';
+        emit_line(ind + clr::grey() + "│" + clr::reset());
         Line link;
         link.col(clr::gold(), "╰──► ");
         add_field_mark(link, f, field_no);
@@ -38,29 +40,35 @@ inline void render_satellites(const std::vector<FieldInfo>& fields,
             .plain(hexptr(addr)).col(clr::grey(), ":");
         const std::size_t link_budget =
             term_width() > vwidth(ind) ? term_width() - vwidth(ind) : 1;
-        std::cout << ind
-                  << (link.w > link_budget ? clip_ansi(link.s, link_budget)
-                                           : link.s)
-                  << '\n';
+        emit_line(ind + (link.w > link_budget ? clip_ansi(link.s, link_budget)
+                                              : link.s));
 
         const std::string pre = ind + "    ";
         auto sat_line = [&](const Line& ln) {
             const std::size_t body_w = std::min(ln.w, SAT_W);
             const std::size_t pad = SAT_W - body_w;
-            std::cout << pre << clr::grey() << "│" << clr::reset() << ' '
-                      << (ln.w > SAT_W ? clip_ansi(ln.s, SAT_W) : ln.s)
-                      << std::string(pad, ' ') << ' '
-                      << clr::grey() << "│" << clr::reset() << '\n';
+            std::string out;
+            out += pre;
+            out += clr::grey(); out += "│"; out += clr::reset(); out += ' ';
+            out += ln.w > SAT_W ? clip_ansi(ln.s, SAT_W) : ln.s;
+            out.append(pad, ' ');
+            out += ' ';
+            out += clr::grey(); out += "│"; out += clr::reset();
+            emit_line(std::move(out));
         };
         // Верх: ╭─◈ куча @ 0x… ─╮
         {
             const std::string t =
                 clip("куча @ " + hexptr(f.target) + " · буфер «" + f.name + "»",
                      SAT_W - 3);
-            std::cout << pre << clr::grey() << "╭─" << clr::violet() << "◈ "
-                      << clr::reset() << clr::gold() << t << clr::reset() << ' '
-                      << clr::grey() << dashes(SAT_W - vwidth(t) - 2) << "╮"
-                      << clr::reset() << '\n';
+            std::string out;
+            out += pre;
+            out += clr::grey(); out += "╭─"; out += clr::violet(); out += "◈ ";
+            out += clr::reset();
+            out += clr::gold(); out += t; out += clr::reset(); out += ' ';
+            out += clr::grey(); out += dashes(SAT_W - vwidth(t) - 2); out += "╮";
+            out += clr::reset();
+            emit_line(std::move(out));
         }
         {
             Line info;
@@ -95,8 +103,8 @@ inline void render_satellites(const std::vector<FieldInfo>& fields,
                      " Б ⋯");
             sat_line(more);
         }
-        std::cout << pre << clr::grey() << "╰" << dashes(SAT_W + 2) << "╯"
-                  << clr::reset() << '\n';
+        emit_line(pre + clr::grey() + "╰" + dashes(SAT_W + 2) + "╯" +
+                  clr::reset());
     }
 }
 
@@ -109,7 +117,7 @@ inline void render_vector_satellite(const VectorInfo& vector,
 
     constexpr std::size_t SAT_W = 52;
     const std::string ind = margin_str() + "   ";
-    std::cout << ind << clr::grey() << "│" << clr::reset() << '\n';
+    emit_line(ind + clr::grey() + "│" + clr::reset());
 
     Line link;
     link.col(clr::gold(), "╰──► ")
@@ -118,19 +126,21 @@ inline void render_vector_satellite(const VectorInfo& vector,
         .plain(hexptr(addr)).col(clr::grey(), ":");
     const std::size_t link_budget =
         term_width() > vwidth(ind) ? term_width() - vwidth(ind) : 1;
-    std::cout << ind
-              << (link.w > link_budget ? clip_ansi(link.s, link_budget)
-                                       : link.s)
-              << '\n';
+    emit_line(ind + (link.w > link_budget ? clip_ansi(link.s, link_budget)
+                                          : link.s));
 
     const std::string pre = ind + "    ";
     auto sat_line = [&](const Line& ln) {
         const std::size_t body_w = std::min(ln.w, SAT_W);
         const std::size_t pad = SAT_W - body_w;
-        std::cout << pre << clr::grey() << "│" << clr::reset() << ' '
-                  << (ln.w > SAT_W ? clip_ansi(ln.s, SAT_W) : ln.s)
-                  << std::string(pad, ' ') << ' '
-                  << clr::grey() << "│" << clr::reset() << '\n';
+        std::string out;
+        out += pre;
+        out += clr::grey(); out += "│"; out += clr::reset(); out += ' ';
+        out += ln.w > SAT_W ? clip_ansi(ln.s, SAT_W) : ln.s;
+        out.append(pad, ' ');
+        out += ' ';
+        out += clr::grey(); out += "│"; out += clr::reset();
+        emit_line(std::move(out));
     };
 
     {
@@ -138,11 +148,14 @@ inline void render_vector_satellite(const VectorInfo& vector,
             "внешний массив @ " + hexptr(vector.data) + " · " +
                 vector.element_type + "[]",
             SAT_W - 3);
-        std::cout << pre << clr::grey() << "╭─" << clr::violet() << "◈ "
-                  << clr::reset() << clr::gold() << title << clr::reset()
-                  << ' ' << clr::grey()
-                  << dashes(SAT_W - vwidth(title) - 2) << "╮"
-                  << clr::reset() << '\n';
+        std::string out;
+        out += pre;
+        out += clr::grey(); out += "╭─"; out += clr::violet(); out += "◈ ";
+        out += clr::reset();
+        out += clr::gold(); out += title; out += clr::reset(); out += ' ';
+        out += clr::grey(); out += dashes(SAT_W - vwidth(title) - 2); out += "╮";
+        out += clr::reset();
+        emit_line(std::move(out));
     }
     {
         Line info;
@@ -183,8 +196,7 @@ inline void render_vector_satellite(const VectorInfo& vector,
                  " элементов ⋯");
         sat_line(more);
     }
-    std::cout << pre << clr::grey() << "╰" << dashes(SAT_W + 2) << "╯"
-              << clr::reset() << '\n';
+    emit_line(pre + clr::grey() + "╰" + dashes(SAT_W + 2) + "╯" + clr::reset());
 }
 
 } // namespace eye::detail
