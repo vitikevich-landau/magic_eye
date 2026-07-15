@@ -156,7 +156,7 @@ void inspect(const T& obj, const std::string& label = "") {
 
     // --- vtable для полиморфных (у множественного наследования — несколько) ---
     if (!sites.empty()) {
-        d::frame_sep("vtable — как работает virtual");
+        d::frame_sep("vtable — гримуар рода (как работает virtual)");
         d::render_vtables(sites, sizeof(T));
     }
 

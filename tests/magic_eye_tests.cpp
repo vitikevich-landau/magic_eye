@@ -240,14 +240,17 @@ int main() {
     ok &= expect(wide.find("#1 this_is_a_deliberately_long_field_name") !=
                      std::string::npos,
                  "stable field number is missing");
-    ok &= expect(wide.find("в объекте: +0x0000…+0x0003") !=
+    // Инклюзивный диапазон рисуется у МНОГОстрочных регионов (у однострочных он
+    // дублировал бы offset слева и в двухзонном режиме гасится). Третий кусок
+    // heap-строки (.cap/.buf) — 16 Б, 2 строки — диапазон сохраняет.
+    ok &= expect(wide.find("в объекте: +0x0018…+0x0027") !=
                      std::string::npos,
                  "inclusive field byte range is missing");
     ok &= expect(wide.find("► КУЧА @ ") != std::string::npos &&
                      wide.find("#2 text.ptr ведёт во внешний блок") !=
                          std::string::npos,
                  "heap string connection is missing");
-    ok &= expect(wide.find("◄ диапазон байт  ► наружу  ↩ внутрь  × nullptr") !=
+    ok &= expect(wide.find("► наружу   ↩ внутрь объекта   × в никуда (nullptr)") !=
                      std::string::npos,
                  "connection legend is missing");
 
@@ -319,7 +322,7 @@ int main() {
     old = std::cout.rdbuf(link_map.rdbuf());
     eye::inspect(links, "связи указателей");
     std::cout.rdbuf(old);
-    ok &= expect(link_map.str().find("↩ этот объект: база+0x0000") !=
+    ok &= expect(link_map.str().find("↩ внутрь объекта: начало +0x0000") !=
                      std::string::npos,
                  "internal pointer connection is missing");
     ok &= expect(link_map.str().find("► внешняя память @ ") !=
