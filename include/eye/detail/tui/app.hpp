@@ -273,17 +273,33 @@ inline void scroll_detail(App& a, long delta) {
     a.detail_scroll = static_cast<std::size_t>(s);
 }
 
+// Переход по указателю под курсором (Enter на листе-указателе или g).
+inline void act_follow(App& a) {
+    const NavSession::FollowOutcome out = a.nav.follow_current();
+    switch (out.what) {
+        case NavSession::Follow::jumped:
+            a.toast = "цикл ⟲ — узел уже в дереве, прыжок к нему";
+            break;
+        case NavSession::Follow::blocked:
+            a.toast = out.reason;
+            break;
+        default:
+            break;
+    }
+}
+
 inline void act_expand(App& a) {
     const NavSession::Act act = a.nav.expand_current();
     if (act == NavSession::Act::leaf) {
         TreeItem* it = a.nav.current();
-        if (it != nullptr && it->node.can_follow) {
-            // Переходы по указателям подключаются этапом M-D.
-            a.toast = "переход: скоро";
-        } else if (it != nullptr && !it->node.follow_block.empty()) {
-            a.toast = it->node.follow_block;
-        }
+        if (it != nullptr &&
+            (it->node.can_follow || !it->node.follow_block.empty()))
+            act_follow(a);
     }
+}
+
+inline void act_back(App& a) {
+    if (!a.nav.back()) a.toast = "истории переходов нет";
 }
 
 inline void dispatch(App& a, const KeyEvent& e, const Layout& l) {
@@ -340,7 +356,7 @@ inline void dispatch(App& a, const KeyEvent& e, const Layout& l) {
             a.nav.collapse_current();
             break;
         case Key::backspace:
-            a.nav.collapse_current();      // история переходов появится в M-D
+            act_back(a);
             break;
         case Key::tab:
             a.focus_detail = !a.focus_detail;
@@ -361,7 +377,8 @@ inline void dispatch(App& a, const KeyEvent& e, const Layout& l) {
                 case U'v': a.mode = DetailMode::vtable; break;
                 case U'x': a.mode = DetailMode::hex; break;
                 case U'f': a.full = !a.full; break;
-                case U'b': a.nav.collapse_current(); break;
+                case U'g': act_follow(a); break;
+                case U'b': act_back(a); break;
                 case U'e':
                     if (a.nav.expand_current_rec())
                         a.toast = "раскрыто до лимита (6 уровней / 500 узлов)";

@@ -12,6 +12,7 @@
 #pragma once
 #include <array>
 #include <cstddef>
+#include <memory>        // unique_ptr/shared_ptr — адаптер умных указателей
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -23,6 +24,89 @@
 namespace eye::detail::nav {
 
 inline constexpr std::size_t NAV_PAGE = 100;   // страница элементов коллекции
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Переходимость указателей (M-D): по какому U* Око согласно идти дальше
+// ────────────────────────────────────────────────────────────────────────────
+
+// Символьные типы: C-строка? Длина неизвестна — чужую память не читаем.
+template <class U>
+inline constexpr bool is_char_like_v =
+    std::is_same_v<U, char> || std::is_same_v<U, signed char> ||
+    std::is_same_v<U, unsigned char> || std::is_same_v<U, wchar_t> ||
+    std::is_same_v<U, char8_t> || std::is_same_v<U, char16_t> ||
+    std::is_same_v<U, char32_t>;
+
+// Умные указатели: unique_ptr / shared_ptr — переход через .get().
+template <class T> struct smart_pointee { using type = void; };
+template <class V, class D> struct smart_pointee<std::unique_ptr<V, D>> {
+    using type = V;
+};
+template <class V> struct smart_pointee<std::shared_ptr<V>> { using type = V; };
+template <class T>
+inline constexpr bool is_smart_ptr_v =
+    !std::is_void_v<typename smart_pointee<std::remove_cvref_t<T>>::type>;
+
+// Тип, у которого есть осмысленный объектный узел (тот же диспетчер, что у
+// панели inspect). Непрозрачные классы не переходимы: карта соврала бы.
+template <class U>
+inline constexpr bool followable_v =
+    (std::is_arithmetic_v<U> && !is_char_like_v<U>) || std::is_enum_v<U> ||
+    std::is_pointer_v<U> || own_described<U> || own_bases<U> ||
+    std::is_same_v<U, std::string> || is_std_vector_v<U> ||
+    is_std_array_v<U> ||
+    (std::is_class_v<U> && std::is_aggregate_v<U> &&
+     std::is_standard_layout_v<U> && !described<U> && !has_bases<U>);
+
+template <class T>
+NavNode make_object_node(const T& obj, std::string label = "",
+                         NodeKind kind = NodeKind::object);
+
+// Оснастить узел переходом по УКАЗАТЕЛЮ на U (обычному или умному). Значение
+// указателя снято в момент построения узла (пересобирается при свёртке-
+// раскрытии родителя); сам pointee читается только при переходе.
+template <class U>
+void arm_follow_to(NavNode& n, const U* p, const std::string& via) {
+    if (p == nullptr) {
+        n.follow_block = "переход невозможен: nullptr";
+        return;
+    }
+    if constexpr (std::is_function_v<U>) {
+        n.follow_block = "указатель на функцию: там код, не данные";
+    } else if constexpr (std::is_void_v<U>) {
+        n.follow_block = "void*: тип стёрт — Око не гадает";
+    } else if constexpr (is_char_like_v<U>) {
+        n.follow_block = "C-строка? длина неизвестна — чужое не читаем";
+    } else if constexpr (std::is_volatile_v<U>) {
+        n.follow_block = "volatile: чтение — побочный эффект, не трогаем";
+    } else if constexpr (!followable_v<std::remove_cv_t<U>>) {
+        n.follow_block = "тип непрозрачен — нужен EYE_DESCRIBE";
+    } else {
+        using V = std::remove_cv_t<U>;
+        const V* target = const_cast<const V*>(p);
+        n.can_follow = true;
+        n.follow = [target, via]() {
+            return make_object_node<V>(*target, "*" + via, NodeKind::object);
+        };
+    }
+}
+
+// Разобрать статический тип поля: сырой указатель / умный указатель.
+template <class FT>
+void arm_follow(NavNode& n, const FT& field, const std::string& via) {
+    using U0 = std::remove_cvref_t<FT>;
+    if constexpr (std::is_pointer_v<U0>) {
+        arm_follow_to(n, field, via);
+    } else if constexpr (is_smart_ptr_v<U0>) {
+        using V = typename smart_pointee<U0>::type;
+        const V* p = field.get();
+        n.preview = p == nullptr ? "→ ∅" : "→ " + hexptr(p);
+        // Полное имя unique_ptr не влезает в строку дерева — очеловечиваем;
+        // точный тип остаётся в панели деталей.
+        n.type = "умный указатель на " + type_name<V>();
+        arm_follow_to(n, p, via);
+    }
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 //  Панели деталей (рисуют в активный Surface по текущей geo())
@@ -261,9 +345,25 @@ inline NavNode make_vptr_node(const VtableSite& site, std::size_t obj_size) {
 //  Объектные узлы (типизированная рекурсия — прямой родич gather)
 // ────────────────────────────────────────────────────────────────────────────
 
-template <class T>
-NavNode make_object_node(const T& obj, std::string label = "",
-                         NodeKind kind = NodeKind::object);
+// Типизированный узел поля: FieldInfo + переход, если поле — указатель.
+// FT — статический тип поля (его знает только этот шаблон, дальше он стёрт).
+template <class FT>
+NavNode make_typed_field_node(std::string name, const FT& field,
+                              const void* obj_base, std::size_t obj_size) {
+    using U = std::remove_cvref_t<FT>;
+    FieldInfo fi;
+    fi.name = std::move(name);
+    fi.offset = static_cast<std::size_t>(
+        reinterpret_cast<const unsigned char*>(std::addressof(field)) -
+        static_cast<const unsigned char*>(obj_base));
+    fi.size = sizeof(field);
+    fi.type = type_name<U>();
+    fi.value = stringify<U>(field);
+    annotate<U>(fi, field);
+    NavNode n = make_field_node(std::move(fi), obj_base, obj_size);
+    arm_follow(n, field, n.title);
+    return n;
+}
 
 // Дети объекта со СВОИМ реестром: базы (рекурсивно объектные узлы) + свои
 // поля + vptr-сайты (все, с владельцами) + скрытые диапазоны.
@@ -295,15 +395,24 @@ std::vector<NavNode> make_registry_children(const T& obj) {
     }
 
     // 2) свои поля (только собственный реестр — поля баз внутри узлов баз).
+    //    Обход типизированный (std::apply по eye_describe): у указателей
+    //    сохраняется статический тип pointee — на нём держится переход.
     if constexpr (own_described<T>) {
-        std::vector<FieldInfo> own;
-        append_described<T>(obj, base, type_name<T>(), 0, own);
+        std::vector<NavNode> own;
+        std::apply(
+            [&](auto... entry) {
+                (..., [&](auto e) {
+                    const auto& field = obj.*(e.ptr);
+                    own.push_back(make_typed_field_node(
+                        std::string(e.name), field, base, sizeof(T)));
+                }(entry));
+            },
+            T::eye_describe());
         std::sort(own.begin(), own.end(),
-                  [](const FieldInfo& a, const FieldInfo& b) {
-                      return a.offset < b.offset;
+                  [](const NavNode& a, const NavNode& b) {
+                      return a.addr < b.addr;   // порядок памяти, как в карте
                   });
-        for (FieldInfo& f : own)
-            kids.push_back(make_field_node(std::move(f), base, sizeof(T)));
+        for (NavNode& n : own) kids.push_back(std::move(n));
     } else {
         kids.push_back(make_note_node(
             "свои поля не описаны — нужен EYE_DESCRIBE"));
@@ -324,20 +433,15 @@ template <class E, class A>
 std::vector<NavNode> make_vector_elem_page(const std::vector<E, A>* pv,
                                            std::size_t from) {
     std::vector<NavNode> page;
+    if constexpr (std::is_same_v<E, bool>) {
+        return page;   // биты упакованы, адресов у элементов нет
+    } else {
     const std::size_t upto = std::min(from + NAV_PAGE, pv->size());
     const auto* data = reinterpret_cast<const unsigned char*>(pv->data());
-    for (std::size_t i = from; i < upto; ++i) {
-        FieldInfo fi;
-        fi.name = "#" + std::to_string(i);
-        fi.offset = i * sizeof(E);
-        fi.size = sizeof(E);
-        fi.align = alignof(E);
-        fi.type = type_name<E>();
-        fi.value = stringify((*pv)[i]);
-        annotate(fi, (*pv)[i]);
-        page.push_back(
-            make_field_node(std::move(fi), data, pv->size() * sizeof(E)));
-    }
+    for (std::size_t i = from; i < upto; ++i)
+        page.push_back(make_typed_field_node(
+            "#" + std::to_string(i), (*pv)[i], data,
+            pv->size() * sizeof(E)));
     if (upto < pv->size()) {
         NavNode more;
         more.kind = NodeKind::more;
@@ -347,6 +451,7 @@ std::vector<NavNode> make_vector_elem_page(const std::vector<E, A>* pv,
         page.push_back(std::move(more));
     }
     return page;
+    }
 }
 
 // Дети std::vector: адресные слоты объекта + узел внешнего массива.
@@ -413,16 +518,20 @@ std::vector<NavNode> make_children(const T& obj) {
         return make_vector_children(obj);
     } else if constexpr (is_std_array_v<T>) {
         std::vector<NavNode> kids;
-        for (FieldInfo& f : collect_array(obj))
-            kids.push_back(make_field_node(std::move(f), base, sizeof(T)));
+        for (std::size_t i = 0; i < obj.size(); ++i)
+            kids.push_back(make_typed_field_node(
+                "#" + std::to_string(i), obj[i], base, sizeof(T)));
         return kids;
     } else if constexpr (std::is_class_v<T> && std::is_aggregate_v<T> &&
                          std::is_standard_layout_v<T> && !described<T> &&
                          !has_bases<T>) {
         std::vector<NavNode> kids;
         if constexpr (field_count<T>() > 0 && field_count<T>() <= 8) {
-            for (FieldInfo& f : collect(obj))
-                kids.push_back(make_field_node(std::move(f), base, sizeof(T)));
+            std::size_t idx = 0;
+            visit_fields(obj, [&](const auto& field) {
+                kids.push_back(make_typed_field_node(
+                    "#" + std::to_string(idx++), field, base, sizeof(T)));
+            });
         } else {
             kids.push_back(make_note_node(
                 "агрегат не разобрать автоматикой — добавь EYE_DESCRIBE"));
@@ -459,7 +568,9 @@ NavNode make_object_node(const T& obj, std::string label, NodeKind kind) {
     n.has_vtable = std::is_polymorphic_v<T>;
     if constexpr (!std::is_class_v<T>) {
         FieldInfo f = self_field(obj);
-        n.preview = "= " + f.value;
+        n.preview = "= " + clip(f.value, 16);
+        // Корень/pointee сам является указателем — с него можно идти дальше.
+        arm_follow(n, obj, n.title);
     }
     const T* p = std::addressof(obj);
     n.can_expand = true;

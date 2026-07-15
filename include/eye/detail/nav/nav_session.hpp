@@ -5,6 +5,7 @@
 //   отрисовки — поэтому тестируется юнитами.
 #pragma once
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -29,6 +30,7 @@ public:
         for (NavNode& n : roots) {
             auto item = std::make_unique<TreeItem>();
             item->node = std::move(n);
+            register_item(item.get());
             roots_.push_back(std::move(item));
         }
         flatten();
@@ -131,6 +133,54 @@ public:
     }
     std::size_t root_count() const { return roots_.size(); }
 
+    // --- переход по указателю (M-D) --------------------------------------------
+    // Итог перехода: moved — pointee прикреплён ребёнком и курсор на нём;
+    // jumped — цель уже была в дереве (цикл ⟲) — прыжок без дубля;
+    // blocked — тип/nullptr не пускают (reason — тост для гида).
+    enum class Follow { none, moved, jumped, blocked };
+    struct FollowOutcome {
+        Follow what = Follow::none;
+        std::string reason;
+    };
+
+    FollowOutcome follow_current() {
+        TreeItem* it = current();
+        if (it == nullptr) return {};
+        NavNode& n = it->node;
+        if (!n.can_follow) {
+            if (!n.follow_block.empty())
+                return {Follow::blocked, n.follow_block};
+            return {};
+        }
+        NavNode target = n.follow();
+        // Цикл: (адрес, тип) уже материализован — прыжок, а не второй узел.
+        // Так связный список обходится честно: каждый узел строится один раз.
+        const MatKey key{target.addr, target.type};
+        if (const auto hit = materialized_.find(key);
+            hit != materialized_.end() && hit->second != it) {
+            history_.push_back(it);
+            set_cursor_to(hit->second);
+            return {Follow::jumped, ""};
+        }
+        history_.push_back(it);
+        append_child(it, std::move(target));
+        it->expanded = true;
+        TreeItem* child = it->kids.back().get();
+        flatten();
+        set_cursor_to(child);
+        return {Follow::moved, ""};
+    }
+
+    // ⌫ — назад по истории переходов. false — истории нет.
+    bool back() {
+        if (history_.empty()) return false;
+        TreeItem* to = history_.back();
+        history_.pop_back();
+        set_cursor_to(to);
+        return true;
+    }
+    std::size_t history_depth() const { return history_.size(); }
+
     // Путь до текущего узла (breadcrumbs в шапке).
     std::string breadcrumbs() const {
         const TreeItem* it = current();
@@ -146,9 +196,21 @@ public:
     }
 
 private:
+    // Ключ материализации: адрес + имя типа. Один и тот же адрес живёт под
+    // разными типами (объект и его primary-база) — это РАЗНЫЕ узлы.
+    using MatKey = std::pair<const void*, std::string>;
+
     std::vector<std::unique_ptr<TreeItem>> roots_;
     std::vector<TreeItem*> visible_;
     std::size_t cursor_ = 0;
+    std::vector<TreeItem*> history_;               // след переходов (⌫)
+    std::map<MatKey, TreeItem*> materialized_;     // (адрес, тип) → узел
+
+    void register_item(TreeItem* it) {
+        const NavNode& n = it->node;
+        if (n.addr == nullptr || n.type.empty()) return;
+        materialized_.emplace(MatKey{n.addr, n.type}, it);   // первый — хозяин
+    }
 
     void load_children(TreeItem* it) {
         it->loaded = true;
@@ -161,6 +223,7 @@ private:
         item->node = std::move(child);
         item->parent = parent;
         item->depth = parent->depth + 1;
+        register_item(item.get());
         parent->kids.push_back(std::move(item));
     }
 
@@ -180,6 +243,7 @@ private:
             item->node = std::move(n);
             item->parent = parent;
             item->depth = parent->depth + 1;
+            register_item(item.get());
             parent->kids.insert(
                 parent->kids.begin() + static_cast<std::ptrdiff_t>(at++),
                 std::move(item));

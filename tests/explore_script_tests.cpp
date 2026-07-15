@@ -21,6 +21,22 @@ struct Knight : Unit {
     EYE_DESCRIBE(Knight, armor, banner)
 };
 
+// Свиток указателей (как в примере 10): наружу, в никуда, на самого себя,
+// C-строка, void*, умный указатель.
+struct Scroll {
+    int         charges = 3;
+    int*        power = nullptr;      // → наружу (int) — переходим
+    void*       nothing = nullptr;    // void* — тип стёрт
+    const char* rune = "ANSUZ";       // C-строка — не читаем
+    Scroll*     self = nullptr;       // → на себя: цикл ⟲
+    EYE_DESCRIBE(Scroll, charges, power, nothing, rune, self)
+};
+
+struct Vault {
+    std::unique_ptr<int> gold = std::make_unique<int>(777);
+    EYE_DESCRIBE(Vault, gold)
+};
+
 namespace {
 
 void set_env(const char* name, const char* value) {
@@ -220,6 +236,113 @@ int main() {
                      "non-TTY degradation did not print static panels");
         ok &= expect(out.str().find("── frame") == std::string::npos,
                      "degradation should not print TUI frames");
+    }
+
+    // ═════ M-D: переходы по указателям ═══════════════════════════════════════
+    int mana = 350;
+    Scroll scroll;
+    scroll.power = &mana;
+    scroll.nothing = &mana;   // ненулевой void*: блок — из-за стёртого типа
+    scroll.self = &scroll;
+
+    // ── переход: pointee-узел под указателем + breadcrumbs + значение ───────
+    {
+        const std::string out = run_with_script(
+            "enter down down enter q",
+            [&](eye::Gallery& g) { g.add(scroll, "свиток"); });
+        ok &= expect(out.find("*power") != std::string::npos,
+                     "pointee node did not appear after follow");
+        ok &= expect(out.find("свиток ▸ power ▸ *power") != std::string::npos,
+                     "breadcrumbs do not include the followed pointee");
+        ok &= expect(out.find("= 350") != std::string::npos,
+                     "pointee value is missing");
+    }
+
+    // ── nullptr и void*: блокируются с причиной в тосте ─────────────────────
+    {
+        const std::string out = run_with_script(
+            "enter down down down enter q",
+            [&](eye::Gallery& g) { g.add(scroll, "свиток"); });
+        ok &= expect(out.find("void*: тип стёрт") != std::string::npos,
+                     "void* follow is not blocked with a reason");
+    }
+    {
+        Scroll blank;   // power == nullptr
+        const std::string out = run_with_script(
+            "enter down down enter q",
+            [&](eye::Gallery& g) { g.add(blank, "пустой"); });
+        ok &= expect(out.find("переход невозможен: nullptr") !=
+                         std::string::npos,
+                     "nullptr follow is not blocked with a reason");
+    }
+
+    // ── char*: честный отказ читать чужую память ────────────────────────────
+    {
+        const std::string out = run_with_script(
+            "enter down down down down enter q",
+            [&](eye::Gallery& g) { g.add(scroll, "свиток"); });
+        ok &= expect(out.find("C-строка") != std::string::npos,
+                     "char* follow is not blocked with a reason");
+    }
+
+    // ── цикл ⟲: self → прыжок на существующий узел, без дубля ──────────────
+    {
+        const std::string out = run_with_script(
+            "enter down down down down down enter q",
+            [&](eye::Gallery& g) { g.add(scroll, "свиток"); });
+        ok &= expect(out.find("цикл ⟲") != std::string::npos,
+                     "self-pointer did not report a cycle jump");
+        ok &= expect(out.find("*self") == std::string::npos,
+                     "cycle created a duplicate node");
+        // Прыжок вернул курсор на корень свитка.
+        ok &= expect(out.find("►▾ свиток") != std::string::npos,
+                     "cycle jump did not land on the existing node");
+    }
+
+    // ── история: Backspace возвращает к указателю ───────────────────────────
+    {
+        const std::string out = run_with_script(
+            "enter down down enter backspace q",
+            [&](eye::Gallery& g) { g.add(scroll, "свиток"); });
+        ok &= expect(out.find("►  ▾ power") != std::string::npos,
+                     "backspace did not return to the pointer node");
+    }
+    {
+        const std::string out = run_with_script(
+            "backspace q", [&](eye::Gallery& g) { g.add(scroll, "свиток"); });
+        ok &= expect(out.find("истории переходов нет") != std::string::npos,
+                     "empty history should toast");
+    }
+
+    // ── умный указатель: unique_ptr<int> переходим через .get() ─────────────
+    {
+        Vault vault;
+        const std::string out = run_with_script(
+            "enter down enter q",
+            [&](eye::Gallery& g) { g.add(vault, "казна"); });
+        ok &= expect(out.find("умный указатель на int") != std::string::npos,
+                     "smart pointer is not marked in the tree");
+        ok &= expect(out.find("= 777") != std::string::npos,
+                     "unique_ptr pointee value is missing");
+    }
+
+    // ── pointee-агрегат: раскрывается дальше (поля #0…) ─────────────────────
+    {
+        struct Inner { int a; int b; };
+        static Inner inner{11, 22};
+        struct Outer {
+            Inner* link = &inner;
+            EYE_DESCRIBE(Outer, link)
+        };
+        Outer outer;
+        const std::string out = run_with_script(
+            "enter down enter enter q",
+            [&](eye::Gallery& g) { g.add(outer, "внешний"); });
+        ok &= expect(out.find("*link") != std::string::npos,
+                     "aggregate pointee node is missing");
+        ok &= expect(out.find("#0") != std::string::npos &&
+                         out.find("= 11") != std::string::npos,
+                     "aggregate pointee fields did not expand");
     }
 
     // ── explore() — обёртка над галереей ─────────────────────────────────────
