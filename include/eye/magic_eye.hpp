@@ -147,7 +147,9 @@ void inspect(const T& obj, const std::string& label = "") {
     // --- иерархия: под-объекты баз (только при наследовании через EYE_BASES) --
     if (!bases.empty()) {
         d::frame_sep("иерархия — под-объекты баз");
-        d::render_hierarchy(bases, has_vbase);
+        // !vbase_offsets.empty() — записан ли ОТДЕЛЬНЫЙ указатель vbase-ptr:
+        // так заметка про virtual-базу не соврёт для НЕполиморфных ромбов.
+        d::render_hierarchy(bases, has_vbase, !vbase_offsets.empty());
     }
 
     d::frame_sep("память · объект @ " + d::hexptr(&obj) + src);

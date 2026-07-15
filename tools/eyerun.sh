@@ -8,11 +8,13 @@ set -e
 : "${EYE_WIDTH:=126}"
 : "${EYE_COLOR:=0}"
 export EYE_WIDTH EYE_COLOR
+rc=0                          # копим статус: провал сборки → ненулевой выход
 for ex in "$@"; do
   if g++ -std=c++20 -Wall -Wextra -Iinclude "examples/$ex.cpp" -o /tmp/e 2>/tmp/err; then
     echo "===== $ex ====="
     /tmp/e
   else
-    echo "##### BUILD FAIL: $ex"; cat /tmp/err
+    echo "##### BUILD FAIL: $ex"; cat /tmp/err; rc=1
   fi
 done
+exit $rc                       # чтобы smoke/CI видели провал (а не ложный успех)
