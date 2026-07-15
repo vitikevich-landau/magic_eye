@@ -345,6 +345,57 @@ int main() {
                      "aggregate pointee fields did not expand");
     }
 
+    // ═════ M-E: поиск, помощь, EYE_ASCII ═════════════════════════════════════
+
+    // ── поиск: / набирает запрос, живой прыжок, n — следующее ───────────────
+    {
+        const std::string out = run_with_script(
+            "enter / a r m o r enter q",
+            [&](eye::Gallery& g) { g.add(knight, "рыцарь"); });
+        ok &= expect(out.find("поиск: armor") != std::string::npos,
+                     "search bar does not show the query");
+        ok &= expect(out.find("►    armor") != std::string::npos,
+                     "search did not jump to the match");
+    }
+    {
+        // Два совпадения "sp": speed в базе не раскрыт — ищем по 'a' (base/armor).
+        const std::string out = run_with_script(
+            "enter / h p enter q",
+            [&](eye::Gallery& g) { g.add(knight, "рыцарь"); });
+        // hp внутри НЕраскрытой базы — совпадения нет, честный тост.
+        ok &= expect(out.find("не найдено: hp") != std::string::npos,
+                     "search over collapsed nodes should honestly fail");
+    }
+    {
+        // Esc отменяет набор; n без запроса — подсказка.
+        const std::string out = run_with_script(
+            "/ z esc n q", [&](eye::Gallery& g) { g.add(knight, "рыцарь"); });
+        ok &= expect(out.find("поиска ещё не было") != std::string::npos,
+                     "n without a query should hint about /");
+    }
+
+    // ── помощь: ? открывает карту клавиш, любая клавиша закрывает ────────────
+    {
+        const std::string out = run_with_script(
+            "? down q", [&](eye::Gallery& g) { g.add(knight, "рыцарь"); });
+        ok &= expect(out.find("КАРТА КЛАВИШ") != std::string::npos,
+                     "help screen is missing");
+        ok &= expect(out.find("назад по истории переходов") != std::string::npos,
+                     "help screen lacks the key map");
+    }
+
+    // ── EYE_ASCII=1: стрелки дерева и спайн — чистый ASCII ──────────────────
+    {
+        set_env("EYE_ASCII", "1");
+        const std::string out = run_with_script(
+            "q", [&](eye::Gallery& g) { g.add(knight, "рыцарь"); });
+        set_env("EYE_ASCII", "0");
+        ok &= expect(out.find("> рыцарь") != std::string::npos,
+                     "EYE_ASCII tree arrows are not ASCII");
+        ok &= expect(out.find("▸") == std::string::npos,
+                     "EYE_ASCII frame still leaks unicode arrows");
+    }
+
     // ── explore() — обёртка над галереей ─────────────────────────────────────
     {
         set_env("EYE_SCRIPT", "q");

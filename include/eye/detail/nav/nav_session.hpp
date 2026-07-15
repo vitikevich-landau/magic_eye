@@ -53,6 +53,9 @@ public:
     }
     void cursor_home() { cursor_ = 0; }
     void cursor_end() { cursor_ = visible_.empty() ? 0 : visible_.size() - 1; }
+    void set_cursor_index(std::size_t i) {
+        if (i < visible_.size()) cursor_ = i;
+    }
 
     // --- раскрытие / свёртка ---------------------------------------------------
     enum class Act { none, expanded, collapsed, to_parent, paged, leaf };
