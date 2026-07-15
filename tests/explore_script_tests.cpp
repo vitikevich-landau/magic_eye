@@ -39,6 +39,14 @@ struct Vault {
     EYE_DESCRIBE(Vault, gold)
 };
 
+// Полиморфный зверь: у vptr-узла hex-режим обязан дампить СЛОТ в живом
+// объекте (base+offset), а не копию значения в замыкании (находка Codex).
+struct Beast {
+    int fangs = 2;
+    virtual ~Beast() = default;
+    EYE_DESCRIBE(Beast, fangs)
+};
+
 namespace {
 
 void set_env(const char* name, const char* value) {
@@ -396,6 +404,20 @@ int main() {
                      "EYE_ASCII tree arrows are not ASCII");
         ok &= expect(out.find("▸") == std::string::npos,
                      "EYE_ASCII frame still leaks unicode arrows");
+    }
+
+    // ── vptr-узел в hex-режиме дампит слот ЖИВОГО объекта (Codex, PR #5) ────
+    {
+        Beast beast;
+        // enter (раскрыть корень) → end (vptr — последний ребёнок) → x (hex).
+        const std::string out = run_with_script(
+            "enter end x q", [&](eye::Gallery& g) { g.add(beast, "зверь"); });
+        std::ostringstream expected;
+        expected << "объём 8 Б @ " << static_cast<const void*>(&beast);
+        ok &= expect(out.find("vptr «Beast» · hex") != std::string::npos,
+                     "vptr hex panel is missing");
+        ok &= expect(out.find(expected.str()) != std::string::npos,
+                     "vptr hex mode does not dump the live object slot");
     }
 
     // ── снимок экрана: s пишет кадр в файл чистым текстом ───────────────────

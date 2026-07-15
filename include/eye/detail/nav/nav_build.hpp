@@ -209,11 +209,16 @@ inline void render_field_detail(const FieldInfo& f, const void* obj_base,
     }
 }
 
-// vptr-панель: блок-диаграмма vtable этого сайта.
-inline void render_vptr_detail(const VtableSite& site, std::size_t obj_size,
-                               DetailMode m) {
+// vptr-панель: блок-диаграмма vtable этого сайта. obj_base — начало ЖИВОГО
+// объекта: hex-режим дампит слот vptr по адресу base+offset (а не копию
+// значения в замыкании — по ней не видно, как объект живёт).
+inline void render_vptr_detail(const VtableSite& site, const void* obj_base,
+                               std::size_t obj_size, DetailMode m) {
     if (m == DetailMode::hex) {
-        render_hex_panel("vptr", &site.vptr, sizeof(void*));
+        render_hex_panel(
+            "vptr «" + site.owner + "»",
+            static_cast<const unsigned char*>(obj_base) + site.offset,
+            sizeof(void*), site.offset);
         return;
     }
     frame_top("vptr «" + site.owner + "»");
@@ -327,16 +332,18 @@ inline NavNode make_field_node(FieldInfo f, const void* obj_base,
     return n;
 }
 
-inline NavNode make_vptr_node(const VtableSite& site, std::size_t obj_size) {
+inline NavNode make_vptr_node(const VtableSite& site, const void* obj_base,
+                              std::size_t obj_size) {
     NavNode n;
     n.kind = NodeKind::vptr;
     n.title = site.owner.empty() ? "vptr" : "vptr «" + site.owner + "»";
     n.type = "→ vtable " + site.dyn_type;
     n.suffix = "+" + hex4(site.offset);
+    n.addr = static_cast<const unsigned char*>(obj_base) + site.offset;
     n.size = sizeof(void*);
     n.has_vtable = true;
-    n.detail = [site, obj_size](DetailMode m) {
-        render_vptr_detail(site, obj_size, m);
+    n.detail = [site, obj_base, obj_size](DetailMode m) {
+        render_vptr_detail(site, obj_base, obj_size, m);
     };
     return n;
 }
@@ -421,7 +428,7 @@ std::vector<NavNode> make_registry_children(const T& obj) {
     // 3) vptr-сайты уровня T (модель собирает и сайты баз — те покажут свои).
     if constexpr (std::is_polymorphic_v<T>)
         kids.push_back(make_vptr_node(
-            read_vtable_site(obj, 0, type_name<T>()), sizeof(T)));
+            read_vtable_site(obj, 0, type_name<T>()), base, sizeof(T)));
 
     return kids;
 }
@@ -538,7 +545,7 @@ std::vector<NavNode> make_children(const T& obj) {
         }
         if constexpr (std::is_polymorphic_v<T>)
             kids.push_back(make_vptr_node(
-                read_vtable_site(obj, 0, type_name<T>()), sizeof(T)));
+                read_vtable_site(obj, 0, type_name<T>()), base, sizeof(T)));
         return kids;
     } else if constexpr (std::is_class_v<T>) {
         std::vector<NavNode> kids;
@@ -546,7 +553,7 @@ std::vector<NavNode> make_children(const T& obj) {
             "непрозрачный класс: private/конструкторы — нужен EYE_DESCRIBE"));
         if constexpr (std::is_polymorphic_v<T>)
             kids.push_back(make_vptr_node(
-                read_vtable_site(obj, 0, type_name<T>()), sizeof(T)));
+                read_vtable_site(obj, 0, type_name<T>()), base, sizeof(T)));
         return kids;
     } else {
         return {};   // скаляр/указатель — лист, вся правда в панели деталей
