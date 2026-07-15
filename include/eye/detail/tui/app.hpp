@@ -7,6 +7,7 @@
 //     • не-TTY без скрипта — честная деградация: print_static всех корней.
 #pragma once
 #include <cstddef>
+#include <cstdio>    // fopen "wbx" (эксклюзивно) + snprintf — снимок экрана
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -86,6 +87,7 @@ struct App {
     bool alive = true;
     bool help = false;             // ? / F1 — экран помощи
     bool search_edit = false;      // / — строка поиска забирает ввод
+    bool want_snap = false;        // s — снять текущий экран в файл
     std::string query;             // последний запрос (для n/N)
     std::size_t tree_scroll = 0;
     std::size_t detail_scroll = 0;
@@ -253,6 +255,66 @@ inline void pop_utf8(std::string& s) {
     }
 }
 
+// ─── снимок экрана в файл (клавиша s) ────────────────────────────────────────
+// Пишет ПОСЛЕДНИЙ показанный кадр чистым текстом (без ANSI) — дневник
+// исследования, который можно диффать и вкладывать в отчёты. Имя — первое
+// свободное eye_snap_NNN.txt в каталоге EYE_SNAP_DIR (по умолчанию текущем).
+// Возвращает путь; пустая строка — не записалось.
+//
+// Имя занимается АТОМАРНО: fopen в режиме "wbx" (C11, есть в glibc и UCRT) —
+// O_EXCL под капотом. Так два процесса в общем каталоге не затирают снимки
+// друг друга (проба-потом-создание страдала TOCTOU), а занятое или
+// недоступное имя (EACCES от чужого файла) просто пропускается к следующему
+// номеру, не застревая на нём.
+inline std::string dump_screen(const Canvas& canvas) {
+    std::string dir = env_value("EYE_SNAP_DIR");
+    if (dir.empty()) dir = ".";
+    std::FILE* out = nullptr;
+    std::string path;
+    for (int n = 1; n <= 999 && out == nullptr; ++n) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "eye_snap_%03d.txt", n);
+        path = dir + "/" + name;
+        out = std::fopen(path.c_str(), "wbx");   // только СОЗДАТЬ, не усекать
+    }
+    if (out == nullptr) return "";
+    for (const std::string& row : canvas.rows()) {
+        std::string plain = strip_ansi(row);
+        while (!plain.empty() && plain.back() == ' ')   // паддинг канвы
+            plain.pop_back();
+        plain += '\n';
+        std::fwrite(plain.data(), 1, plain.size(), out);
+    }
+    // Успех объявляем только ПОСЛЕ сброса на диск: полный диск/квота всплывают
+    // на fflush/fclose, а не на буферизованной записи (кадр меньше буфера FILE).
+    const bool flushed = std::fflush(out) == 0 && std::ferror(out) == 0;
+    const bool closed = std::fclose(out) == 0;
+    if (!(flushed && closed)) {
+        std::remove(path.c_str());   // не оставлять пустой огрызок
+        return "";
+    }
+    return path;
+}
+
+// Обслужить запрос снимка ПЕРЕД отрисовкой нового кадра: канва ещё держит
+// ровно тот экран, который пользователь видел, нажимая s (rows() живут до
+// следующего begin_frame — контракт канвы); тост — уже в следующем кадре.
+inline void service_snapshot(App& a, const Canvas& canvas) {
+    if (!a.want_snap) return;
+    a.want_snap = false;
+    const std::string path = dump_screen(canvas);
+    if (path.empty()) {
+        a.toast = "снимок не записался (каталог? место на диске?)";
+        return;
+    }
+    // Длинный EYE_SNAP_DIR вытеснил бы из тоста самое ценное — имя файла
+    // (правый край обрезается по ширине). Каталог пользователь и так знает.
+    const std::size_t slash = path.rfind('/');
+    a.toast = "снимок: " + (vwidth(path) <= 60 || slash == std::string::npos
+                                ? path
+                                : "…" + path.substr(slash));
+}
+
 // ─── экран помощи (отдельная страница: любая клавиша закрывает) ─────────────
 inline void draw_help(App& a, Canvas& canvas, const Layout& l) {
     (void)a;
@@ -272,6 +334,7 @@ inline void draw_help(App& a, Canvas& canvas, const Layout& l) {
         "  e / c        раскрыть ветку рекурсивно / свернуть всё",
         "  1..9         прыжок к N-му корню галереи",
         "  /            поиск по раскрытым узлам · n/N — след./пред.",
+        "  s            снимок экрана в файл (чистый текст, eye_snap_NNN.txt)",
         "  ?, F1        эта помощь",
         "  q, Esc       выход — терминал восстановится как был",
         "",
@@ -550,6 +613,7 @@ inline void dispatch(App& a, const KeyEvent& e, const Layout& l) {
                 case U'f': a.full = !a.full; break;
                 case U'g': act_follow(a); break;
                 case U'b': act_back(a); break;
+                case U's': a.want_snap = true; break;   // снимок экрана в файл
                 case U'e':
                     if (a.nav.expand_current_rec())
                         a.toast = "раскрыто до лимита (6 уровней / 500 узлов)";
@@ -633,6 +697,7 @@ inline void run_scripted(App& a, const std::vector<std::string>& tokens) {
     const Layout l = compute_layout(size);
     std::size_t frame_no = 0;
     const auto print_frame = [&] {
+        service_snapshot(a, canvas);   // канва ещё держит прошлый кадр
         draw(a, canvas, l);
         std::cout << "── frame " << frame_no++ << " ──\n";
         for (const std::string& row : canvas.rows()) std::cout << row << '\n';
@@ -647,24 +712,35 @@ inline void run_scripted(App& a, const std::vector<std::string>& tokens) {
 
 // Живой TUI: цикл «нарисовать → подождать клавишу → применить».
 inline void run_live(App& a) {
-    TermSession term;
-    KeyDecoder keys;
-    Canvas canvas;
-    while (a.alive) {
-        const Layout l = compute_layout(term.size());
-        draw(a, canvas, l);
-        term.write(canvas.end_frame());
-        const bool got = term.pump(
-            [&](const char* d, std::size_t n) { keys.feed(d, n); }, 100);
-        if (!got) {
-            keys.flush_timeout();
-            TermSize now;
-            if (term.take_resize(now)) continue;
+    {
+        TermSession term;
+        KeyDecoder keys;
+        Canvas canvas;
+        while (a.alive) {
+            const Layout l = compute_layout(term.size());
+            service_snapshot(a, canvas);   // канва ещё держит прошлый кадр
+            draw(a, canvas, l);
+            term.write(canvas.end_frame());
+            const bool got = term.pump(
+                [&](const char* d, std::size_t n) { keys.feed(d, n); }, 100);
+            if (!got) {
+                keys.flush_timeout();
+                TermSize now;
+                if (term.take_resize(now)) continue;
+            }
+            KeyEvent e;
+            while (a.alive && keys.next(e))
+                dispatch(a, e, compute_layout(term.size()));
         }
-        KeyEvent e;
-        while (a.alive && keys.next(e))
-            dispatch(a, e, compute_layout(term.size()));
+        // «s, затем сразу q» приходят ОДНИМ пакетом ввода: want_snap поставлен,
+        // но до следующей итерации цикл уже не дожил. Обслуживаем хвост здесь,
+        // пока канва ещё держит последний показанный кадр.
+        a.toast.clear();               // ниже печатаем ТОЛЬКО итог снимка
+        service_snapshot(a, canvas);
     }
+    // TermSession уже восстановил терминал — итог снимка сообщаем обычной
+    // строкой в основной экран (тост показать больше некому).
+    if (!a.toast.empty()) std::cout << gl_mark() << ' ' << a.toast << '\n';
 }
 
 // Точка входа галереи. Правила деградации — в шапке файла.

@@ -2,7 +2,9 @@
 // клавиши исполняются из строки, кадры печатаются в stdout — терминал не нужен.
 #include <eye/magic_eye.hpp>
 
+#include <cstdio>    // std::remove — уборка файла снимка
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -394,6 +396,49 @@ int main() {
                      "EYE_ASCII tree arrows are not ASCII");
         ok &= expect(out.find("▸") == std::string::npos,
                      "EYE_ASCII frame still leaks unicode arrows");
+    }
+
+    // ── снимок экрана: s пишет кадр в файл чистым текстом ───────────────────
+    {
+        set_env("EYE_SNAP_DIR", ".");
+        const std::string out = run_with_script(
+            "enter s q", [&](eye::Gallery& g) { g.add(knight, "рыцарь"); });
+        const std::size_t at = out.find("снимок: ");
+        ok &= expect(at != std::string::npos,
+                     "snapshot toast with the file path is missing");
+        if (at != std::string::npos) {
+            std::string path =
+                out.substr(at + std::string("снимок: ").size());
+            path = path.substr(0, path.find('\n'));
+            while (!path.empty() && path.back() == ' ') path.pop_back();
+            std::ifstream file(path, std::ios::binary);
+            std::stringstream content;
+            content << file.rdbuf();
+            ok &= expect(file.good(), "snapshot file was not created");
+            ok &= expect(content.str().find("рыцарь") != std::string::npos &&
+                             content.str().find("armor") != std::string::npos,
+                         "snapshot lacks the tree that was on screen");
+            ok &= expect(content.str().find('\033') == std::string::npos,
+                         "snapshot leaked ANSI escapes");
+            std::remove(path.c_str());
+        }
+    }
+    {
+        // Два снимка в одной сессии: эксклюзивное создание («wbx») занимает
+        // имя атомарно, второй уходит в следующий свободный номер.
+        set_env("EYE_SNAP_DIR", ".");
+        const std::string out = run_with_script(
+            "s s q", [&](eye::Gallery& g) { g.add(knight, "рыцарь"); });
+        std::size_t first = out.find("снимок: ");
+        std::size_t second =
+            first == std::string::npos ? first : out.find("снимок: ", first + 1);
+        ok &= expect(second != std::string::npos,
+                     "second snapshot toast is missing");
+        std::size_t removed = 0;
+        for (const char* name : {"./eye_snap_001.txt", "./eye_snap_002.txt"})
+            if (std::remove(name) == 0) ++removed;
+        ok &= expect(removed == 2,
+                     "two snapshots did not land in two distinct files");
     }
 
     // ── explore() — обёртка над галереей ─────────────────────────────────────

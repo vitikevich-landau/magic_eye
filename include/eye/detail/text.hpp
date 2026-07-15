@@ -82,6 +82,26 @@ inline std::string clip_ansi(const std::string& s, std::size_t maxcp) {
     return out;
 }
 
+// Убрать из готовой строки все CSI-последовательности (цвет, инверсию):
+// снимок экрана уходит в файл чистым текстом, читаемым любым редактором.
+inline std::string strip_ansi(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (std::size_t i = 0; i < s.size();) {
+        if (s[i] == '\033' && i + 1 < s.size() && s[i + 1] == '[') {
+            std::size_t j = i + 2;   // параметры — до финального байта @…~
+            while (j < s.size() &&
+                   !(static_cast<unsigned char>(s[j]) >= 0x40 &&
+                     static_cast<unsigned char>(s[j]) <= 0x7e))
+                ++j;
+            i = j < s.size() ? j + 1 : s.size();
+            continue;
+        }
+        out += s[i++];
+    }
+    return out;
+}
+
 // Видимая ширина УЖЕ собранной строки с ANSI-кодами: CSI-последовательности
 // не занимают колонок, остальное считается кодовыми точками (как vwidth).
 inline std::size_t vwidth_ansi(const std::string& s) {

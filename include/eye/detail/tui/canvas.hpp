@@ -38,8 +38,11 @@ public:
 
     TermSize size() const { return size_; }
 
-    // Прямой доступ к строкам ТЕКУЩЕГО кадра (между begin_frame и end_frame).
-    // Нужен скриптовому режиму EYE_SCRIPT: кадры печатаются как текст.
+    // Прямой доступ к строкам ПОСЛЕДНЕГО собранного кадра. КОНТРАКТ: строки
+    // валидны с момента отрисовки и ДО СЛЕДУЮЩЕГО begin_frame — end_frame их
+    // не трогает (prev_ получает копию, см. ниже). На этом держатся скриптовый
+    // режим EYE_SCRIPT и снимок экрана клавишей s (он читает кадр уже после
+    // end_frame). Менять копию на move в end_frame нельзя.
     const std::vector<std::string>& rows() const { return cur_; }
 
     // Положить готовую ANSI-строку в (row, col), не шире max_w колонок.
@@ -91,7 +94,7 @@ public:
         // Курсор — в угол, чтобы случайный вывод не пачкал середину экрана.
         if (!out.empty() || full)
             out += "\x1b[" + std::to_string(cur_.empty() ? 1 : cur_.size()) + ";1H";
-        prev_ = cur_;
+        prev_ = cur_;      // именно КОПИЯ: cur_ обязан пережить end_frame (rows())
         full_repaint_ = false;
         return out;
     }
