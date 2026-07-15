@@ -119,6 +119,12 @@ struct HasEnum { Color c = Color::Green; int n = 5; EYE_DESCRIBE(HasEnum, c, n) 
 struct PlainBase2 { int pb = 1; };
 struct PlainDerived : PlainBase2 { int pd = 2; };
 
+// --- агрегат, наследующий ПУСТУЮ базу: standard-layout, но field_count == 0
+//     (пустая база «съедает» braced-слот счётчика) — поле не должно уйти в
+//     padding, тип показывается непрозрачным. --------------------------------
+struct EmptyBase {};
+struct EmptyDerived : EmptyBase { int x = 42; };
+
 namespace {
 
 struct LongNames {
@@ -440,6 +446,14 @@ int main() {
     const std::string plain_out = render_obj(plain, 126, "plain");
     ok &= expect(plain_out.find("добавь EYE_DESCRIBE") != std::string::npos,
                  "base-bearing aggregate not opaque (compile error / padding)");
+
+    // --- регресс (Codex): агрегат с ПУСТОЙ базой (field_count==0) — поле не в
+    //     padding, тип непрозрачный ---------------------------------------------
+    EmptyDerived empty_derived;
+    const std::string ed_out = render_obj(empty_derived, 126, "emptyderived");
+    ok &= expect(ed_out.find("добавь EYE_DESCRIBE") != std::string::npos &&
+                     ed_out.find("дыра, внутри мусор") == std::string::npos,
+                 "empty-base aggregate rendered its member as padding");
 
     return ok ? 0 : 1;
 }

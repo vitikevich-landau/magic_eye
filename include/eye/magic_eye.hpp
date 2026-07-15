@@ -115,7 +115,13 @@ void inspect(const T& obj, const std::string& label = "") {
         // bindings гарантированно разложат его (это по стандарту). Агрегат с
         // базой, где поля разбиты между базой и наследником, НЕ standard-layout
         // → уходит в «непрозрачный», а не роняет компиляцию. Кроссплатформенно.
-        if constexpr (d::field_count<T>() <= 8) {
+        if constexpr (d::field_count<T>() == 0 && !std::is_empty_v<T>) {
+            // ПУСТАЯ база «съедает» первый braced-слот счётчика, и field_count
+            // даёт 0, хотя поля есть (struct D : Empty { int x; }). Structured
+            // bindings разложили бы D, но по счётчику 0 — честнее показать
+            // непрозрачным, чем потерять поля в padding.
+            opaque = true;
+        } else if constexpr (d::field_count<T>() <= 8) {
             fields = d::collect(obj);
             src = " · агрегат (имена стёрты)";
         } else {
