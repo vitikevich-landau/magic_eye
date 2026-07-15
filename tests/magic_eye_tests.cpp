@@ -1,4 +1,4 @@
-#include "magic_eye.hpp"
+#include <eye/magic_eye.hpp>
 
 #include <cstdint>
 #include <cstdlib>
@@ -6,6 +6,52 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+// Наследование проверяем на типах в ГЛОБАЛЬНОЙ области — тогда имена типов
+// коротки ("BaseA", а не "(anonymous namespace)::BaseA") и метки совпадают.
+// --- множественное наследование (два полиморфных базовых под-объекта) -------
+struct BaseA { int a = 1; virtual ~BaseA() = default; EYE_DESCRIBE(BaseA, a) };
+struct BaseB { int b = 2; virtual ~BaseB() = default; EYE_DESCRIBE(BaseB, b) };
+struct Derived : BaseA, BaseB {
+    int c = 3;
+    EYE_BASES(BaseA, BaseB)
+    EYE_DESCRIBE(Derived, c)
+};
+
+// --- ромб с общей virtual-базой ---------------------------------------------
+struct VBase { int soul = 7; virtual ~VBase() = default; EYE_DESCRIBE(VBase, soul) };
+struct Left  : virtual VBase { int l = 8; EYE_BASES(VBase) EYE_DESCRIBE(Left, l) };
+struct Right : virtual VBase { int r = 9; EYE_BASES(VBase) EYE_DESCRIBE(Right, r) };
+struct Diamond : Left, Right {
+    int d = 10;
+    EYE_BASES(Left, Right)
+    EYE_DESCRIBE(Diamond, d)
+};
+
+// --- 3-уровневая НЕвиртуальная цепочка (регресс: база-в-базе на offset 0) -----
+struct GBase { int g = 1; EYE_DESCRIBE(GBase, g) };
+struct GMid : GBase { int mid = 2; EYE_BASES(GBase) EYE_DESCRIBE(GMid, mid) };
+struct GLeaf : GMid { int leaf = 3; EYE_BASES(GMid) EYE_DESCRIBE(GLeaf, leaf) };
+
+// --- повторяющаяся НЕвиртуальная база (два разных под-объекта одного типа) ----
+// Имя базы (Coin) НЕ префикс имён наследников — иначе подсчёт «из базы Coin»
+// поймал бы и «из базы RepL».
+struct Coin { int x = 5; EYE_DESCRIBE(Coin, x) };
+struct RepL : Coin { int rl = 6; EYE_BASES(Coin) EYE_DESCRIBE(RepL, rl) };
+struct RepR : Coin { int rr = 7; EYE_BASES(Coin) EYE_DESCRIBE(RepR, rr) };
+struct RepDerived : RepL, RepR {
+    int rd = 8;
+    EYE_BASES(RepL, RepR)
+    EYE_DESCRIBE(RepDerived, rd)
+};
+
+// --- НЕполиморфная virtual-база (регресс: указатель vbase, не padding) --------
+struct NPBase { int soul = 1; EYE_DESCRIBE(NPBase, soul) };
+struct NPDerived : virtual NPBase {
+    int mana = 2;
+    EYE_BASES(NPBase)
+    EYE_DESCRIBE(NPDerived, mana)
+};
 
 namespace {
 
@@ -52,6 +98,24 @@ std::string render_vector_at(std::size_t width) {
     eye::inspect(values, "vector regression");
     std::cout.rdbuf(old);
     return out.str();
+}
+
+template <class T>
+std::string render_obj(const T& obj, std::size_t width, const char* label) {
+    set_env("EYE_WIDTH", std::to_string(width).c_str());
+    std::ostringstream out;
+    std::streambuf* old = std::cout.rdbuf(out.rdbuf());
+    eye::inspect(obj, label);
+    std::cout.rdbuf(old);
+    return out.str();
+}
+
+std::size_t count_occurrences(const std::string& text, const std::string& needle) {
+    std::size_t n = 0;
+    for (std::size_t p = text.find(needle); p != std::string::npos;
+         p = text.find(needle, p + needle.size()))
+        ++n;
+    return n;
 }
 
 bool lines_fit(const std::string& text, std::size_t width) {
@@ -192,6 +256,59 @@ int main() {
     ok &= expect(escaped.find('\n') == std::string::npos &&
                      escaped.find('\033') == std::string::npos,
                  "string value contains terminal control bytes");
+
+    // --- наследование: множественное (два полиморфных базовых под-объекта) ---
+    Derived derived;
+    for (const std::size_t width : {80u, 100u, 126u})
+        ok &= expect(lines_fit(render_obj(derived, width, "MI"), width),
+                     "multiple-inheritance render exceeds terminal width");
+    const std::string mi = render_obj(derived, 126, "MI");
+    ok &= expect(mi.find("иерархия — под-объекты баз") != std::string::npos,
+                 "hierarchy section is missing");
+    ok &= expect(mi.find("из базы BaseA") != std::string::npos &&
+                     mi.find("из базы BaseB") != std::string::npos,
+                 "inherited field owner labels are missing");
+    ok &= expect(mi.find("vptr «BaseB»") != std::string::npos,
+                 "secondary base vptr site is missing");
+#if EYE_ITANIUM_ABI
+    ok &= expect(mi.find("offset-to-top = -") != std::string::npos,
+                 "secondary base offset-to-top is missing (Itanium)");
+#endif
+
+    // --- наследование: ромб с общей virtual-базой ---
+    Diamond diamond_obj;
+    const std::string diamond = render_obj(diamond_obj, 126, "diamond");
+    ok &= expect(lines_fit(diamond, 126), "diamond render exceeds terminal width");
+    ok &= expect(diamond.find("virtual") != std::string::npos &&
+                     diamond.find("общий (показан выше)") != std::string::npos,
+                 "shared virtual base is not marked as shared");
+    // Общий VBase лёг в память ОДИН раз → ровно одна метка «из базы VBase».
+    ok &= expect(count_occurrences(diamond, "из базы VBase") == 1,
+                 "shared virtual base fields were double-counted");
+
+    // --- регресс #1: 3-уровневая невиртуальная цепочка (база-в-базе на off 0) ---
+    // hp/speed базы-в-базе НЕ должны теряться, и её нельзя метить «общий».
+    GLeaf leaf_obj;
+    const std::string chain = render_obj(leaf_obj, 126, "chain");
+    ok &= expect(chain.find("из базы GBase") != std::string::npos &&
+                     chain.find("из базы GMid") != std::string::npos,
+                 "nested (base-of-base) fields were dropped");
+    ok &= expect(chain.find("общий (показан выше)") == std::string::npos,
+                 "non-virtual base was wrongly marked as shared");
+
+    // --- регресс #2: повторяющаяся невиртуальная база — оба под-объекта видны ---
+    RepDerived rep_obj;
+    const std::string rep = render_obj(rep_obj, 126, "rep");
+    ok &= expect(count_occurrences(rep, "из базы Coin") == 2,
+                 "a repeated non-virtual base subobject was dropped");
+
+    // --- регресс #3: НЕполиморфная virtual-база → указатель vbase, не padding ---
+    NPDerived np_obj;
+    const std::string np = render_obj(np_obj, 126, "np");
+    ok &= expect(np.find("указатель на virtual-базу") != std::string::npos,
+                 "virtual-base pointer of a non-polymorphic type mislabeled");
+    ok &= expect(np.find("из базы NPBase") != std::string::npos,
+                 "virtual base field missing for non-polymorphic derived");
 
     return ok ? 0 : 1;
 }

@@ -23,6 +23,7 @@
 #endif
 
 #include <algorithm>     // std::min (превью кучи)
+#include <array>         // адаптер std::array
 #include <cctype>
 #include <cstddef>
 #include <cstdint>       // std::uintptr_t — сравнение адресов без UB-серости
@@ -161,6 +162,40 @@ template <class T>
 inline constexpr bool is_std_vector_v =
     is_std_vector_impl<std::remove_cvref_t<T>>::value;
 
+// std::array<E,N> — агрегат из ОДНОГО C-массива, но structured bindings его
+// раскладывают по tuple-протоколу (на N частей), а не по единственному члену.
+// Из-за этого автоматика M2 на нём спотыкается — даём отдельный адаптер.
+template <class T> struct is_std_array_impl : std::false_type {};
+template <class E, std::size_t N>
+struct is_std_array_impl<std::array<E, N>> : std::true_type {};
+template <class T>
+inline constexpr bool is_std_array_v =
+    is_std_array_impl<std::remove_cvref_t<T>>::value;
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Наследование: реестр баз EYE_BASES и определение virtual-баз
+// ════════════════════════════════════════════════════════════════════════════
+// Тип-метка базы: EYE_BASES(A, B) отдаёт tuple<BaseTag<A>, BaseTag<B>>.
+template <class B> struct BaseTag { using type = B; };
+
+// Есть ли у класса реестр баз EYE_BASES?
+template <class T>
+concept has_bases = requires { T::eye_bases(); };
+
+// Виртуальная ли база B у D? Приём: обратный привод B*→D* СУЩЕСТВУЕТ для
+// невиртуальной базы и ill-formed для виртуальной (нельзя спуститься из vbase).
+// Проверяем через SFINAE. Зовём только для реальных доступных баз, поэтому
+// «ill-formed по другой причине» здесь не путается с виртуальностью.
+template <class D, class B, class = void>
+struct is_virtual_base_impl : std::true_type {};
+template <class D, class B>
+struct is_virtual_base_impl<
+    D, B, std::void_t<decltype(static_cast<D*>(std::declval<B*>()))>>
+    : std::false_type {};
+template <class D, class B>
+inline constexpr bool is_virtual_base_v =
+    std::is_base_of_v<B, D> && is_virtual_base_impl<D, B>::value;
+
 // ════════════════════════════════════════════════════════════════════════════
 //  Структуры данных модели (их рисует eye/render.hpp)
 // ════════════════════════════════════════════════════════════════════════════
@@ -172,6 +207,10 @@ struct FieldInfo {
     std::string type;
     std::string value;       // уже отформатированное значение (см. stringify)
     bool inferred = false;   // не private-поле, а совпавший адресный слот ABI
+
+    // --- принадлежность (наследование) --------------------------------------
+    std::string owner;         // класс-владелец поля (метка при наследовании)
+    int         base_depth = 0;  // 0 = поле самого производного; >0 — из базы
 
     // --- аннотации для вида (заполняет annotate) ----------------------------
     enum class Kind { plain, pointer, str };
@@ -200,12 +239,26 @@ struct Passport {        // ответы компилятора о типе (M0)
     bool trivially_copyable;
 };
 
-struct VtableInfo {      // то, что удалось узнать про полиморфный объект (M3)
+// Один vptr-сайт. У класса с множественным наследованием их несколько: каждый
+// полиморфный под-объект базы держит СВОЙ vptr в начале своего под-объекта.
+struct VtableSite {
+    std::size_t    offset = 0;            // где в объекте лежит этот vptr
     const void*    vptr = nullptr;
+    std::string    owner;                 // чей это vptr ("" = самый производный)
     std::string    dyn_type;              // динамический тип (typeid) — портируемо
     bool           itanium = false;       // доступны ли сырые ячейки?
-    std::ptrdiff_t offset_to_top = 0;     // vtable[-2] (только Itanium)
+    std::ptrdiff_t offset_to_top = 0;     // vtable[-2] (только Itanium; ≠0 → вторичная база)
     const void*    slot0 = nullptr;       // vtable[0]  (только Itanium)
+};
+
+// Под-объект базового класса внутри наследника (из реестра EYE_BASES).
+struct BaseInfo {
+    std::string type;                     // имя базового класса
+    std::size_t offset = 0;               // смещение под-объекта в наследнике
+    int         depth = 0;                // уровень вложенности (для отступа)
+    bool        polymorphic = false;      // есть ли у базы свой vptr
+    bool        virtual_base = false;     // виртуальная база (ромб)?
+    bool        shared = false;           // общий vbase, уже показан выше
 };
 
 struct VectorElementInfo {
@@ -460,11 +513,13 @@ Passport passport_of() {
                     std::is_aggregate_v<T>, std::is_trivially_copyable_v<T>};
 }
 
-// Поля из реестра EYE_DESCRIBE (M4) — с именами, видит private.
+// Поля из реестра EYE_DESCRIBE (M4) — с именами, видит private. offset'ы
+// считаются от md_base (начала САМОГО ПРОИЗВОДНОГО объекта), чтобы при
+// наследовании поля базы легли на верные абсолютные смещения.
 template <described T>
-std::vector<FieldInfo> collect(const T& obj) {
-    std::vector<FieldInfo> fields;
-    const auto* base = reinterpret_cast<const unsigned char*>(&obj);
+void append_described(const T& obj, const unsigned char* md_base,
+                      const std::string& owner, int depth,
+                      std::vector<FieldInfo>& out) {
     std::apply(
         [&](auto... entry) {
             (..., [&](auto e) {
@@ -474,15 +529,24 @@ std::vector<FieldInfo> collect(const T& obj) {
                 fi.name   = e.name;
                 fi.offset = static_cast<std::size_t>(
                     reinterpret_cast<const unsigned char*>(
-                        std::addressof(field)) - base);
+                        std::addressof(field)) - md_base);
                 fi.size  = sizeof(field);
                 fi.type  = type_name<FT>();
                 fi.value = stringify<FT>(field);
+                fi.owner = owner;
+                fi.base_depth = depth;
                 annotate<FT>(fi, field);
-                fields.push_back(std::move(fi));
+                out.push_back(std::move(fi));
             }(entry));
         },
         T::eye_describe());
+}
+
+template <described T>
+std::vector<FieldInfo> collect(const T& obj) {
+    std::vector<FieldInfo> fields;
+    append_described<T>(obj, reinterpret_cast<const unsigned char*>(&obj),
+                        type_name<T>(), 0, fields);
     return fields;
 }
 
@@ -508,6 +572,27 @@ std::vector<FieldInfo> collect(const T& obj) {
     return fields;
 }
 
+// Элементы std::array — как поля #0, #1, … Все лежат ВНУТРИ объекта подряд
+// (offset i*sizeof(E)), кучи нет. type/value/аннотации — как у обычного поля.
+template <class E, std::size_t N>
+std::vector<FieldInfo> collect_array(const std::array<E, N>& arr) {
+    std::vector<FieldInfo> fields;
+    const auto* base = reinterpret_cast<const unsigned char*>(std::addressof(arr));
+    for (std::size_t i = 0; i < N; ++i) {
+        const E& e = arr[i];
+        FieldInfo fi;
+        fi.name   = "#" + std::to_string(i);
+        fi.offset = static_cast<std::size_t>(
+            reinterpret_cast<const unsigned char*>(std::addressof(e)) - base);
+        fi.size  = sizeof(E);
+        fi.type  = type_name<E>();
+        fi.value = stringify<E>(e);
+        annotate<E>(fi, e);
+        fields.push_back(std::move(fi));
+    }
+    return fields;
+}
+
 // Весь объект как ОДНО «поле» — для скаляров, указателей и std::string,
 // у которых нет разбираемых полей, но схема памяти всё равно нужна.
 template <class T>
@@ -523,23 +608,121 @@ FieldInfo self_field(const T& obj) {
     return fi;
 }
 
-// Разбор vtable (M3). vptr и динамический тип — портируемо (обе ABI); сырые
-// служебные ячейки читаем только под Itanium (иначе оставляем itanium=false).
+// Разбор одного vptr-сайта (M3). vptr и динамический тип — портируемо (обе
+// ABI); сырые служебные ячейки читаем только под Itanium. obj — ссылка на
+// под-объект (для вторичной базы vptr лежит в НАЧАЛЕ её под-объекта).
 template <class T>
     requires std::is_polymorphic_v<T>
-VtableInfo vtable_info(const T& obj) {
-    VtableInfo vi;
+VtableSite read_vtable_site(const T& obj, std::size_t offset,
+                            const std::string& owner) {
+    VtableSite s;
+    s.offset = offset;
+    s.owner  = owner;
     void* vptr = nullptr;
-    std::memcpy(&vptr, &obj, sizeof(vptr));  // первые 8 байт — vptr (обе ABI)
-    vi.vptr = vptr;
-    vi.dyn_type = type_name_of(typeid(obj)); // динамический тип объекта — RTTI
+    std::memcpy(&vptr, std::addressof(obj), sizeof(vptr));  // начало под-объекта = vptr
+    s.vptr = vptr;
+    s.dyn_type = type_name_of(typeid(obj));  // динамический тип (RTTI, самый производный)
 #if EYE_ITANIUM_ABI
-    vi.itanium = true;
+    s.itanium = true;
     void** vtable = static_cast<void**>(vptr);
-    std::memcpy(&vi.offset_to_top, vtable - 2, sizeof(vi.offset_to_top));  // [-2]
-    std::memcpy(&vi.slot0, vtable, sizeof(vi.slot0));                      // [0]
+    std::memcpy(&s.offset_to_top, vtable - 2, sizeof(s.offset_to_top));  // [-2]
+    std::memcpy(&s.slot0, vtable, sizeof(s.slot0));                      // [0]
 #endif
-    return vi;
+    return s;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Модель объекта: поля (свои + унаследованные), под-объекты баз, vptr-сайты.
+//  Собирается РЕКУРСИВНО по реестрам EYE_DESCRIBE/EYE_BASES.
+// ════════════════════════════════════════════════════════════════════════════
+struct ObjectModel {
+    std::vector<FieldInfo>  fields;      // все поля с АБСОЛЮТНЫМИ offset'ами
+    std::vector<BaseInfo>   bases;       // под-объекты баз (метки/иерархия)
+    std::vector<VtableSite> vptrs;       // все vptr-сайты (у MI их несколько)
+    std::vector<std::size_t> vbase_ptrs; // служебные указатели на virtual-базу
+    bool has_virtual_base = false;       // есть ли хоть одна virtual-база (ромб)
+};
+
+// Рекурсивный обход. md_base — начало самого производного объекта; все offset'ы
+// считаются от него. seen — адреса уже учтённых VIRTUAL-баз: общий vbase (ромб)
+// встречается по двум путям, но в память лёг ОДИН раз — сверяем по адресу и
+// второй раз внутрь не спускаемся. НЕвиртуальные базы не дедупим: под-объект
+// базы-в-базе на offset 0 имеет тот же адрес, что и наследник, — совпадение
+// адресов у них нормально и НЕ означает общий под-объект.
+template <class T>
+void gather(const T& obj, ObjectModel& m, const unsigned char* md_base,
+            int depth, std::vector<const void*>& seen) {
+    const auto* self = reinterpret_cast<const unsigned char*>(std::addressof(obj));
+    const std::size_t self_off = static_cast<std::size_t>(self - md_base);
+
+    // 1) vptr этого под-объекта. Первым пишем сайт самого производного (offset 0),
+    //    поэтому общий с primary-базой vptr достаётся производному, а не базе.
+    if constexpr (std::is_polymorphic_v<T>) {
+        bool dup = false;
+        for (const auto& s : m.vptrs)
+            if (s.offset == self_off) { dup = true; break; }
+        if (!dup)
+            m.vptrs.push_back(read_vtable_site(obj, self_off, type_name<T>()));
+    }
+
+    // 2) базы (глубже) — их поля лягут по абсолютным offset'ам, порядок неважен:
+    //    перед отрисовкой всё сортируется по offset.
+    bool self_has_vbase = false;
+    if constexpr (has_bases<T>) {
+        std::apply(
+            [&](auto... tag) {
+                (..., [&](auto t) {
+                    using B = typename decltype(t)::type;
+                    const B& b = static_cast<const B&>(obj);
+                    const auto* baddr =
+                        reinterpret_cast<const unsigned char*>(std::addressof(b));
+                    BaseInfo bi;
+                    bi.type = type_name<B>();
+                    bi.offset = static_cast<std::size_t>(baddr - md_base);
+                    bi.depth = depth;
+                    bi.polymorphic = std::is_polymorphic_v<B>;
+                    bi.virtual_base = is_virtual_base_v<T, B>;
+                    if (bi.virtual_base) { self_has_vbase = true; m.has_virtual_base = true; }
+                    // Дедуп по адресу — ТОЛЬКО для виртуальных баз.
+                    bi.shared =
+                        bi.virtual_base &&
+                        std::find(seen.begin(), seen.end(),
+                                  static_cast<const void*>(baddr)) != seen.end();
+                    m.bases.push_back(bi);
+                    if (!bi.shared) {
+                        if (bi.virtual_base)
+                            seen.push_back(static_cast<const void*>(baddr));
+                        gather<B>(b, m, md_base, depth + 1, seen);
+                    }
+                }(tag));
+            },
+            T::eye_bases());
+    }
+
+    // 2b) НЕполиморфный под-объект с virtual-базой всё равно держит служебный
+    //     указатель на virtual-базу в своём начале (Itanium: указатель на vtable
+    //     со смещениями vbase; MSVC: vbptr). Полиморфный уже учтён как vptr выше.
+    if constexpr (!std::is_polymorphic_v<T>) {
+        if (self_has_vbase) {
+            bool dup = false;
+            for (std::size_t o : m.vbase_ptrs)
+                if (o == self_off) { dup = true; break; }
+            if (!dup) m.vbase_ptrs.push_back(self_off);
+        }
+    }
+
+    // 3) собственные поля T (offset'ы от md_base).
+    if constexpr (described<T>)
+        append_described<T>(obj, md_base, type_name<T>(), depth, m.fields);
+}
+
+template <class T>
+ObjectModel model_of(const T& obj) {
+    ObjectModel m;
+    std::vector<const void*> seen;
+    gather<T>(obj, m, reinterpret_cast<const unsigned char*>(std::addressof(obj)),
+              0, seen);
+    return m;
 }
 
 } // namespace eye::detail
@@ -575,4 +758,15 @@ VtableInfo vtable_info(const T& obj) {
     using Self = Type;                                                \
     static constexpr auto eye_describe() {                            \
         return std::tuple{EYE_FOR_EACH(EYE_ENTRY, __VA_ARGS__)};      \
+    }
+
+// Реестр баз: EYE_BASES(A, B) → метод eye_bases() c tuple<BaseTag<A>,BaseTag<B>>.
+// Ставится в public-часть НАСЛЕДНИКА рядом с EYE_DESCRIBE. В самом EYE_DESCRIBE
+// тогда перечисляются только СОБСТВЕННЫЕ поля — поля каждой базы Око возьмёт из
+// ЕЁ реестра (поэтому видны и private-поля базы). Базы должны быть публичными:
+// Око приводит объект к базе через static_cast, а он требует доступной базы.
+#define EYE_BASE_ENTRY(B) eye::detail::BaseTag<B>{},
+#define EYE_BASES(...)                                                \
+    static constexpr auto eye_bases() {                               \
+        return std::tuple{EYE_FOR_EACH(EYE_BASE_ENTRY, __VA_ARGS__)}; \
     }

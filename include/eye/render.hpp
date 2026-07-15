@@ -441,7 +441,7 @@ inline void render_passport(const Passport& p) {
 //  Регион (vptr / поле / под-часть строки / padding / скрытое) = блок строк.
 // ════════════════════════════════════════════════════════════════════════════
 struct Region {
-    enum class R { field, padding, vptr, opaque };
+    enum class R { field, padding, vptr, opaque, vbase };
     R what;
     std::size_t off, size;
     const FieldInfo* f;             // для field
@@ -489,6 +489,7 @@ inline const char* region_glyph(const Region& r) {
     switch (r.what) {
         case Region::R::padding: return "░";
         case Region::R::vptr:    return "▒";
+        case Region::R::vbase:   return "▒";
         case Region::R::opaque:  return "▓";
         default:                 return r.shade ? "▓" : "█";
     }
@@ -497,55 +498,72 @@ inline const char* region_color(const Region& r) {
     switch (r.what) {
         case Region::R::padding: return clr::red();
         case Region::R::vptr:    return clr::violet();
+        case Region::R::vbase:   return clr::violet();
         case Region::R::opaque:  return clr::grey();
         default:                 return r.shade ? clr::cyan2() : clr::cyan();
     }
 }
 
-// Разбить поля объекта на регионы. У полиморфных первые 8 байт — vptr.
-// std::string на libstdc++ раскрываем в .ptr / .len / .buf: каждая часть
-// получает СВОИ строки и СВОЮ выноску (иначе подписи съезжают с байтов).
+// Разбить поля объекта на регионы. Каждый vptr-сайт (у множественного
+// наследования их несколько) занимает свои 8 байт. std::string на libstdc++
+// раскрываем в .ptr / .len / .buf: каждая часть получает СВОИ строки и СВОЮ
+// выноску (иначе подписи съезжают с байтов). fields ожидаются отсортированными
+// по offset — тогда чередование тонов █/▓ идёт в порядке памяти.
 inline std::vector<Region> build_regions(const std::vector<FieldInfo>& fields,
-                                         std::size_t total, bool poly,
+                                         std::size_t total,
+                                         const std::vector<std::size_t>& vptr_offsets,
+                                         const std::vector<std::size_t>& vbase_offsets,
                                          bool opaque,
                                          const std::string& opaque_why = "") {
-    std::vector<Region> rs;
-    std::size_t cursor = 0;
-
-    if (poly && (fields.empty() || fields.front().offset >= sizeof(void*))) {
-        rs.push_back({Region::R::vptr, 0, sizeof(void*)});
-        cursor = sizeof(void*);
-    }
+    // 1) Все «занятые» регионы: vptr-сайты + указатели vbase + поля (сплит строк).
+    std::vector<Region> placed;
+    for (std::size_t off : vptr_offsets)
+        placed.push_back({Region::R::vptr, off, sizeof(void*)});
+    for (std::size_t off : vbase_offsets)
+        placed.push_back({Region::R::vbase, off, sizeof(void*)});
     for (std::size_t i = 0; i < fields.size(); ++i) {
         const FieldInfo& f = fields[i];
-        if (f.offset > cursor && f.offset <= total) {   // дыра перед полем
-            Region p{opaque ? Region::R::opaque : Region::R::padding,
-                     cursor, f.offset - cursor};
-            p.why = opaque ? opaque_why
-                           : clip(f.name, 12) +
-                                 " требует адрес, кратный " +
-                                 std::to_string(f.align);
-            rs.push_back(p);
-        }
         const bool shade = i % 2 != 0;
-        // Раскладка {ptr, len, buf} знакома, поле легло по сетке → разбираем.
         if (f.kind == FieldInfo::Kind::str && f.str_layout &&
             f.size == 32 && f.offset % 8 == 0) {
-            rs.push_back({Region::R::field, f.offset,      8, &f, shade, 1, i + 1});
-            rs.push_back({Region::R::field, f.offset + 8,  8, &f, shade, 2, i + 1});
-            rs.push_back({Region::R::field, f.offset + 16, 16, &f, shade, 3, i + 1});
+            placed.push_back({Region::R::field, f.offset,      8, &f, shade, 1, i + 1});
+            placed.push_back({Region::R::field, f.offset + 8,  8, &f, shade, 2, i + 1});
+            placed.push_back({Region::R::field, f.offset + 16, 16, &f, shade, 3, i + 1});
         } else {
-            rs.push_back({Region::R::field, f.offset, f.size, &f, shade, 0,
-                          i + 1});
+            placed.push_back({Region::R::field, f.offset, f.size, &f, shade, 0, i + 1});
         }
-        if (f.offset + f.size > cursor) cursor = f.offset + f.size;
+    }
+    // 2) По возрастанию offset; при равных — vptr раньше поля (stable хранит
+    //    порядок частей строки и уже отсортированных полей).
+    std::stable_sort(placed.begin(), placed.end(),
+                     [](const Region& a, const Region& b) { return a.off < b.off; });
+
+    // 3) Прогон: между занятыми регионами вставляем padding / скрытое.
+    std::vector<Region> rs;
+    std::size_t cursor = 0;
+    for (const Region& r : placed) {
+        if (r.off > cursor && r.off <= total) {      // дыра перед регионом
+            Region p{opaque ? Region::R::opaque : Region::R::padding,
+                     cursor, r.off - cursor};
+            if (opaque)
+                p.why = opaque_why;
+            else if (r.what == Region::R::vptr)
+                p.why = "выравнивание под vptr под-объекта";
+            else if (r.what == Region::R::vbase)
+                p.why = "выравнивание под указатель virtual-базы";
+            else if (r.f != nullptr)
+                p.why = clip(r.f->name, 12) + " требует адрес, кратный " +
+                        std::to_string(r.f->align);
+            rs.push_back(p);
+        }
+        rs.push_back(r);
+        if (r.off + r.size > cursor) cursor = r.off + r.size;
     }
     if (opaque && cursor < total) {
         Region hidden{Region::R::opaque, cursor, total - cursor};
         hidden.why = opaque_why;
         rs.push_back(hidden);
-    }
-    else if (cursor < total) {
+    } else if (cursor < total) {
         Region p{Region::R::padding, cursor, total - cursor};
         p.why = "добивка sizeof до кратного выравниванию";
         rs.push_back(p);
@@ -707,6 +725,13 @@ inline std::vector<Line> region_notes(const Region& r, const unsigned char* base
             out = {l1, l2, l3};
             break;
         }
+        case Region::R::vbase: {
+            Line l1; l1.col(clr::violet(), "указатель на virtual-базу");
+            Line l2 = range_note(r);
+            Line l3; l3.col(clr::grey(), "вставил компилятор ради общей vbase");
+            out = {l1, l2, l3};
+            break;
+        }
         case Region::R::padding: {
             Line l1;
             l1.col(clr::red(), "padding " + std::to_string(r.size) +
@@ -798,6 +823,12 @@ inline std::vector<Line> region_notes(const Region& r, const unsigned char* base
                 out.push_back(field_headline(f, budget, !standalone, !wrap_name,
                                              wrap_name ? 0 : r.field_no));
                 out.push_back(range_note(r));
+                if (f.base_depth > 0 && !f.owner.empty()) {
+                    Line ob;
+                    ob.col(clr::grey(), "из базы ")
+                      .col(clr::cyan(), clip(f.owner, budget > 8 ? budget - 8 : 6));
+                    out.push_back(ob);
+                }
                 if (f.kind == FieldInfo::Kind::pointer)
                     pointer_notes(out, f, base, total, budget);
                 if (f.kind == FieldInfo::Kind::str && !f.str_layout) {
@@ -844,9 +875,12 @@ inline Line gut_connector(std::size_t i, std::size_t k, bool has_text) {
 
 // ---- Сама секция «память» ---------------------------------------------------
 inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
-                          std::size_t talign, bool poly, const void* addr,
-                          bool opaque, bool standalone,
+                          std::size_t talign,
+                          const std::vector<std::size_t>& vptr_offsets,
+                          const std::vector<std::size_t>& vbase_offsets,
+                          const void* addr, bool opaque, bool standalone,
                           const VectorInfo* vector = nullptr) {
+    const bool poly = !vptr_offsets.empty();
     const auto* base = static_cast<const unsigned char*>(addr);
     // Реестр мог перечислить поля не по порядку — сортируем по offset, иначе
     // регионы и padding посчитаются неверно.
@@ -857,10 +891,12 @@ inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
     const std::string opaque_why = vector == nullptr
         ? ""
         : "роль зависит от STL и режима Debug/Release";
-    const auto regions = build_regions(fields, total, poly, opaque, opaque_why);
+    const auto regions = build_regions(fields, total, vptr_offsets, vbase_offsets,
+                                       opaque, opaque_why);
     const bool gutter = geo().gutter;
 
-    bool has_pad = false, has_vptr = false, has_field = false, has_op = false;
+    bool has_pad = false, has_vptr = false, has_field = false, has_op = false,
+         has_vbase_ptr = false;
     std::string strip(total, '.');
     for (const Region& r : regions)
         for (std::size_t b = r.off; b < r.off + r.size && b < total; ++b)
@@ -868,13 +904,15 @@ inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
                 case Region::R::field:   strip[b] = 'f'; has_field = true; break;
                 case Region::R::padding: strip[b] = 'p'; has_pad = true;   break;
                 case Region::R::vptr:    strip[b] = 'v'; has_vptr = true;  break;
+                case Region::R::vbase:   strip[b] = 'b'; has_vbase_ptr = true; break;
                 case Region::R::opaque:  strip[b] = 'o'; has_op = true;    break;
             }
-    std::size_t nf = 0, np = 0, nv = 0;
+    std::size_t nf = 0, np = 0, nv = 0, nb = 0;
     for (char c : strip) {
         nf += c == 'f' || c == 'o';
         np += c == 'p';
         nv += c == 'v';
+        nb += c == 'b';
     }
     np += static_cast<std::size_t>(
         std::count(strip.begin(), strip.end(), '.'));   // не покрыто = дыра
@@ -892,6 +930,9 @@ inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
     if (nv != 0)
         overview.col(clr::grey(), " · vptr ")
                 .col(clr::violet(), std::to_string(nv) + " Б");
+    if (nb != 0)
+        overview.col(clr::grey(), " · vbase-ptr ")
+                .col(clr::violet(), std::to_string(nb) + " Б");
     overview.col(clr::grey(), " · padding ")
             .col(np == 0 ? clr::dim() : clr::red(), std::to_string(np) + " Б");
     if (np != 0) {
@@ -1017,6 +1058,8 @@ inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
         }
         if (has_pad)   leg.col(clr::red(), "░").col(clr::grey(), " padding  ");
         if (has_vptr)  leg.col(clr::violet(), "▒").col(clr::grey(), " vptr  ");
+        if (has_vbase_ptr)
+            leg.col(clr::violet(), "▒").col(clr::grey(), " vbase-ptr  ");
         if (has_op)    leg.col(clr::grey(), "▓ скрытое");
         put(leg);
 
@@ -1049,7 +1092,9 @@ inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
     }
 
     // --- совет по перестановке (привет, pahole) --------------------------------
-    if (np > 0 && !poly && !opaque && fields.size() > 1) {
+    // При virtual-базе указатель vbase — обязательная служебная ячейка, её
+    // перестановкой полей не убрать, поэтому совет тогда не выдаём.
+    if (np > 0 && !poly && !opaque && fields.size() > 1 && vbase_offsets.empty()) {
         auto sorted = fields;
         std::sort(sorted.begin(), sorted.end(),
                   [](const FieldInfo& a, const FieldInfo& b) {
@@ -1078,9 +1123,33 @@ inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+//  Секция «иерархия» — под-объекты баз (только при наследовании через EYE_BASES)
+// ════════════════════════════════════════════════════════════════════════════
+inline void render_hierarchy(const std::vector<BaseInfo>& bases,
+                             bool has_vbase = false) {
+    for (const BaseInfo& b : bases) {
+        Line l;
+        l.sp(static_cast<std::size_t>(b.depth) * 2);
+        if (b.depth) l.col(clr::grey(), "└ ");
+        l.col(clr::cyan(), clip(b.type, std::max<std::size_t>(8, frame_width() / 2)))
+         .col(clr::grey(), " @ ")
+         .col(clr::green(), "+" + hex4(b.offset));
+        if (b.polymorphic)  l.col(clr::grey(), " · ").col(clr::violet(), "vptr");
+        if (b.virtual_base) l.col(clr::grey(), " · ").col(clr::gold(), "virtual");
+        if (b.shared)       l.col(clr::grey(), " · общий (показан выше)");
+        put(l);
+    }
+    put_text("offset — где под-объект базы лежит внутри наследника");
+    if (has_vbase) {
+        put_text("virtual-база: на offset 0 — служебный указатель на неё");
+        put_text("под MSVC это vbptr (иная модель); vtable-схема ниже — по Itanium");
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 //  Секция vtable (M3) — блок-диаграмма: объект → vptr → vtable → слот → код
 // ════════════════════════════════════════════════════════════════════════════
-inline void render_vtable(const VtableInfo& vi, std::size_t obj_size) {
+inline void render_primary_vtable(const VtableSite& vi, std::size_t obj_size) {
     // Текстовая строка-факт: те же 8 байт, что лежали в начале дампа.
     Line l1;
     l1.col(clr::violet(), "vptr = ").plain(hexptr(vi.vptr))
@@ -1155,6 +1224,49 @@ inline void render_vtable(const VtableInfo& vi, std::size_t obj_size) {
     Line tr;
     tr.col(clr::grey(), "вызов virtual: объект → vptr → слот [0] → прыжок на код");
     put(tr);
+}
+
+// Все vptr-сайты. Для primary (offset 0) — подробная блок-диаграмма; для
+// вторичных баз (множественное наследование) — компактные строки с их
+// offset-to-top (тот самый «шаг назад» к началу самого производного объекта).
+inline void render_vtables(const std::vector<VtableSite>& sites,
+                           std::size_t obj_size) {
+    if (sites.empty()) return;
+    const VtableSite* primary = &sites.front();
+    for (const VtableSite& s : sites)
+        if (s.offset == 0) { primary = &s; break; }
+
+    render_primary_vtable(*primary, obj_size);
+
+    bool any_secondary = false;
+    for (const VtableSite& s : sites)
+        if (&s != primary) { any_secondary = true; break; }
+    if (!any_secondary) return;
+
+    put_blank();
+    put_text("множественное наследование: у каждой полиморфной базы — свой vptr");
+    for (const VtableSite& s : sites) {
+        if (&s == primary) continue;
+        Line l;
+        l.col(clr::violet(), "vptr «" + clip(s.owner, 18) + "»")
+         .col(clr::grey(), " @ +").col(clr::green(), hex4(s.offset));
+        put(l);
+        if (s.itanium) {
+            Line l2;
+            l2.sp(2).col(clr::grey(), "offset-to-top = ")
+              .col(clr::cyan(), std::to_string(s.offset_to_top))
+              .col(clr::grey(), " — шаг назад к началу объекта");
+            put(l2);
+            Line l3;
+            l3.sp(2).col(clr::grey(), "код [0]: ").plain(hexptr(s.slot0));
+            put(l3);
+        } else {
+            Line l2;
+            l2.sp(2).col(clr::grey(), "динамич. тип: ")
+              .col(clr::cyan(), clip(s.dyn_type, 22));
+            put(l2);
+        }
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
