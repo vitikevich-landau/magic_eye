@@ -28,6 +28,9 @@ public:
 };
 
 int main() {
+    int x = 3;
+    eye::inspect(x);
+
     Mage solmyr{"Solmyr", 13};
     eye::inspect(solmyr, "Солмир (private через реестр)");
 

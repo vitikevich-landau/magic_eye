@@ -31,6 +31,7 @@
 ```bash
 cmake -B build
 cmake --build build
+ctest --test-dir build --output-on-failure
 ./build/m0_passport        # и остальные: m1_xray ... ex01_basics ...
 ```
 

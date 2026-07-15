@@ -22,8 +22,12 @@
 #  define EYE_ITANIUM_ABI 0   // MSVC: своя объектная модель, деманглер не нужен
 #endif
 
+#include <algorithm>     // std::min (превью кучи)
 #include <cctype>
 #include <cstddef>
+#include <cstdint>       // std::uintptr_t — сравнение адресов без UB-серости
+#include <cstdio>        // std::snprintf (hex-запись целых)
+#include <cstdlib>       // std::free
 #include <cstring>       // std::memcpy, std::char_traits
 #include <memory>        // std::unique_ptr
 #include <sstream>
@@ -148,15 +152,44 @@ concept described = requires { T::eye_describe(); };
 template <class T>
 concept auto_inspectable = std::is_aggregate_v<T> && !described<T>;
 
+// Специализации стандартных типов идут отдельными адаптерами: их private-поля
+// недоступны, зато публичный API даёт достаточно фактов для честной схемы.
+template <class T> struct is_std_vector_impl : std::false_type {};
+template <class E, class A>
+struct is_std_vector_impl<std::vector<E, A>> : std::true_type {};
+template <class T>
+inline constexpr bool is_std_vector_v =
+    is_std_vector_impl<std::remove_cvref_t<T>>::value;
+
 // ════════════════════════════════════════════════════════════════════════════
 //  Структуры данных модели (их рисует eye/render.hpp)
 // ════════════════════════════════════════════════════════════════════════════
 struct FieldInfo {
-    std::string name;    // "#0" в M2-режиме; настоящее имя из реестра
-    std::size_t offset;
-    std::size_t size;
+    std::string name;        // "#0" в M2-режиме; настоящее имя из реестра
+    std::size_t offset = 0;
+    std::size_t size   = 0;
+    std::size_t align  = 1;  // alignof поля — объясняет дыры ПЕРЕД ним
     std::string type;
-    std::string value;   // уже отформатированное значение (см. stringify)
+    std::string value;       // уже отформатированное значение (см. stringify)
+    bool inferred = false;   // не private-поле, а совпавший адресный слот ABI
+
+    // --- аннотации для вида (заполняет annotate) ----------------------------
+    enum class Kind { plain, pointer, str };
+    Kind kind = Kind::plain;
+
+    bool        integral = false;  // целое → вид покажет hex и little-endian
+    std::string alt;               // альтернативная запись значения (hex)
+
+    // kind == pointer | str: куда смотрит (значение указателя / data() строки)
+    const void* target = nullptr;
+    std::string pointee;           // что лежит по адресу (скалярный pointee)
+
+    // kind == str:
+    bool        sso = false;       // буфер внутри объекта (SSO), не в куче
+    std::size_t str_len = 0;
+    std::size_t str_cap = 0;
+    bool        str_layout = false;         // раскладка ptr/len/buf известна
+    std::vector<unsigned char> heap_bytes;  // превью буфера из кучи (спутник)
 };
 
 struct Passport {        // ответы компилятора о типе (M0)
@@ -173,6 +206,29 @@ struct VtableInfo {      // то, что удалось узнать про по
     bool           itanium = false;       // доступны ли сырые ячейки?
     std::ptrdiff_t offset_to_top = 0;     // vtable[-2] (только Itanium)
     const void*    slot0 = nullptr;       // vtable[0]  (только Itanium)
+};
+
+struct VectorElementInfo {
+    std::size_t index = 0;
+    std::string value;
+    std::vector<unsigned char> bytes;  // первые байты живого элемента
+};
+
+// Семантический адаптер std::vector. size/capacity/data и элементы — точные
+// факты публичного API. slots — осторожная корреляция этих адресов с сырыми
+// словами самого объекта; она помечается знаком ≈ и не выдаётся за стандарт ABI.
+struct VectorInfo {
+    std::string element_type;
+    std::size_t size = 0;
+    std::size_t capacity = 0;
+    std::size_t element_size = 0;
+    std::size_t heap_used = 0;
+    std::size_t heap_reserved = 0;
+    const void* data = nullptr;
+    bool bit_packed = false;       // std::vector<bool>: data() намеренно нет
+    bool slots_matched = false;
+    std::vector<FieldInfo> slots;
+    std::vector<VectorElementInfo> elements;
 };
 
 // Одна запись реестра EYE_DESCRIBE: имя поля + указатель-на-член.
@@ -209,16 +265,37 @@ std::string stringify(const FT& field) {
         else
             oss << "char(" << static_cast<int>(byte) << ')';  // управляющий → код
         return oss.str();
+    } else if constexpr (std::is_pointer_v<U> &&
+                         std::is_function_v<std::remove_pointer_t<U>>) {
+        // Указатель на функцию: static_cast в void* для него ill-formed.
+        // reinterpret_cast — conditionally-supported, но работает на всех
+        // трёх наших компиляторах (GCC/Clang/MSVC).
+        std::ostringstream oss;
+        oss << reinterpret_cast<const void*>(field);
+        return oss.str();
     } else if constexpr (std::is_pointer_v<U>) {
         // Указатель (включая char*!) — как АДРЕС, а не разыменовываем: os<<(char*)
         // прочитал бы чужую память как C-строку (мусор / выход за буфер / краш).
         std::ostringstream oss;
-        oss << static_cast<const void*>(field);
+        // Сначала сохраняем volatile, затем явно снимаем его только для
+        // стандартного ostream-overload const void*. Сам адрес не читаем.
+        const volatile void* p = static_cast<const volatile void*>(field);
+        oss << const_cast<const void*>(p);
         return oss.str();
     } else if constexpr (std::is_array_v<U>) {
         // C-массив: char[N] распался бы в const char* и читался как строка за
         // границей массива (UB, ловится ASan'ом). Показываем размер; байты — ниже.
         return "[массив " + std::to_string(sizeof(U)) + " байт]";
+    } else if constexpr (std::is_same_v<U, std::string>) {
+        // В кавычках и БЕЗ управляющих байтов: '\n' порвал бы рамку панели,
+        // а 0x1b (ESC) инжектил бы живую ANSI-последовательность в терминал.
+        std::string s;
+        s.reserve(field.size() + 2);
+        s += '"';
+        for (unsigned char c : field)
+            s += (c < 0x20 || c == 0x7f) ? '.' : static_cast<char>(c);
+        s += '"';
+        return s;
     } else if constexpr (printable<U>) {
         std::ostringstream oss;
         if constexpr (std::is_same_v<U, bool>) oss << std::boolalpha;
@@ -226,6 +303,149 @@ std::string stringify(const FT& field) {
         return oss.str();
     } else {
         return "—";  // непечатаемый тип (вложенная структура и т.п.) — честно
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Аннотации поля: семантика, которую вид превратит в выноски и стрелки.
+//  Всё вычисляется здесь, в модели, в момент осмотра (пока объект жив).
+// ════════════════════════════════════════════════════════════════════════════
+template <class FT>
+void annotate(FieldInfo& fi, const FT& field) {
+    using U = std::remove_cvref_t<FT>;
+    fi.align = alignof(U);
+
+    if constexpr (std::is_integral_v<U> && !std::is_same_v<U, bool> &&
+                  sizeof(U) > 1) {
+        // Целое шире байта: рядом с десятичным значением пригодится hex —
+        // по нему видно little-endian в дампе (младший байт лежит первым).
+        fi.integral = true;
+        char b[24];
+        unsigned long long v = 0;
+        std::memcpy(&v, &field, sizeof(field));   // без знаковых сюрпризов
+        std::snprintf(b, sizeof(b), "0x%0*llx", static_cast<int>(sizeof(U) * 2), v);
+        fi.alt = b;
+    } else if constexpr (std::is_same_v<U, std::string>) {
+        fi.kind    = FieldInfo::Kind::str;
+        fi.target  = field.data();
+        fi.str_len = field.size();
+        fi.str_cap = field.capacity();
+        // SSO: буфер лежит ВНУТРИ футпринта самой строки? Сравниваем адреса
+        // как числа — сравнение «сырых» указателей из разных блоков не для if.
+        const auto fb = reinterpret_cast<std::uintptr_t>(&field);
+        const auto db = reinterpret_cast<std::uintptr_t>(field.data());
+        fi.sso = db >= fb && db < fb + sizeof(field);
+#if defined(__GLIBCXX__)
+        // libstdc++: знакомая раскладка {ptr, len, union{buf16|cap}} —
+        // вид сможет подписать под-регионы поля.
+        fi.str_layout = true;
+#endif
+        if (!fi.sso && field.data() != nullptr) {
+            // Буфер в куче: снимем превью для панели-спутника (+1 — '\0').
+            const auto* p = reinterpret_cast<const unsigned char*>(field.data());
+            const std::size_t n = std::min<std::size_t>(field.size() + 1, 48);
+            fi.heap_bytes.assign(p, p + n);
+        }
+    } else if constexpr (std::is_pointer_v<U> &&
+                         !std::is_function_v<std::remove_pointer_t<U>>) {
+        fi.kind   = FieldInfo::Kind::pointer;
+        const volatile void* p = static_cast<const volatile void*>(field);
+        fi.target = const_cast<const void*>(p);
+        // Произвольный сырой указатель нельзя безопасно проверить перед
+        // разыменованием: он может быть висячим, но всё ещё ненулевым. Поэтому
+        // инспектор показывает адрес, однако чужую память сам не читает.
+    }
+}
+
+// std::vector: получаем точную семантику через public API, а затем ищем внутри
+// объекта последовательность трёх машинных слов {data, end, capacity_end}.
+// Поиск, а не жёсткие offset'ы, переживает разницу GCC/MSVC и Debug/Release.
+template <class E, class A>
+VectorInfo vector_info(const std::vector<E, A>& v) {
+    VectorInfo info;
+    info.element_type = type_name<E>();
+    info.size = v.size();
+    info.capacity = v.capacity();
+    info.element_size = sizeof(E);
+    info.bit_packed = std::is_same_v<E, bool>;
+
+    const std::size_t preview = std::min<std::size_t>(v.size(), 8);
+    info.elements.reserve(preview);
+    for (std::size_t i = 0; i < preview; ++i) {
+        VectorElementInfo element;
+        element.index = i;
+        if constexpr (std::is_same_v<E, bool>) {
+            const bool value = v[i];
+            element.value = stringify(value);
+        } else {
+            const E& value = v[i];
+            element.value = stringify(value);
+            const auto* bytes = reinterpret_cast<const unsigned char*>(
+                std::addressof(value));
+            const std::size_t n = std::min<std::size_t>(sizeof(E), 8);
+            element.bytes.assign(bytes, bytes + n);
+        }
+        info.elements.push_back(std::move(element));
+    }
+
+    if constexpr (std::is_same_v<E, bool>) {
+        // vector<bool> хранит упакованные биты и не предоставляет data().
+        return info;
+    } else {
+        info.data = static_cast<const void*>(v.data());
+        info.heap_used = v.size() * sizeof(E);
+        info.heap_reserved = v.capacity() * sizeof(E);
+
+        if (info.data == nullptr || sizeof(v) < 3 * sizeof(void*)) return info;
+
+        const auto begin = reinterpret_cast<std::uintptr_t>(info.data);
+        const auto end = begin + info.heap_used;
+        const auto capacity_end = begin + info.heap_reserved;
+        const auto* object = reinterpret_cast<const unsigned char*>(
+            std::addressof(v));
+
+        std::size_t match = sizeof(v);
+        for (std::size_t off = 0; off + 3 * sizeof(void*) <= sizeof(v);
+             off += alignof(void*)) {
+            std::uintptr_t words[3]{};
+            for (std::size_t i = 0; i < 3; ++i)
+                std::memcpy(&words[i], object + off + i * sizeof(void*),
+                            sizeof(void*));
+            if (words[0] == begin && words[1] == end &&
+                words[2] == capacity_end) {
+                match = off;
+                break;
+            }
+        }
+        if (match == sizeof(v)) return info;
+
+        auto add_slot = [&](std::size_t off, std::string name,
+                            std::string type, std::uintptr_t value,
+                            FieldInfo::Kind kind = FieldInfo::Kind::plain) {
+            FieldInfo field;
+            field.name = std::move(name);
+            field.offset = off;
+            field.size = sizeof(void*);
+            field.align = alignof(void*);
+            field.type = std::move(type);
+            field.value = stringify(reinterpret_cast<const void*>(value));
+            field.inferred = true;
+            field.kind = kind;
+            if (kind == FieldInfo::Kind::pointer) {
+                field.target = info.data;
+                if (!info.elements.empty())
+                    field.pointee = "#0 = " + info.elements.front().value;
+            }
+            info.slots.push_back(std::move(field));
+        };
+
+        add_slot(match, "≈ data()/begin", info.element_type + " *", begin,
+                 FieldInfo::Kind::pointer);
+        add_slot(match + sizeof(void*), "≈ end = data + size", "граница", end);
+        add_slot(match + 2 * sizeof(void*), "≈ capacity_end", "граница",
+                 capacity_end);
+        info.slots_matched = true;
+        return info;
     }
 }
 
@@ -250,12 +470,16 @@ std::vector<FieldInfo> collect(const T& obj) {
             (..., [&](auto e) {
                 const auto& field = obj.*(e.ptr);
                 using FT = std::remove_cvref_t<decltype(field)>;
-                fields.push_back(FieldInfo{
-                    e.name,
-                    static_cast<std::size_t>(
-                        reinterpret_cast<const unsigned char*>(
-                            std::addressof(field)) - base),
-                    sizeof(field), type_name<FT>(), stringify<FT>(field)});
+                FieldInfo fi;
+                fi.name   = e.name;
+                fi.offset = static_cast<std::size_t>(
+                    reinterpret_cast<const unsigned char*>(
+                        std::addressof(field)) - base);
+                fi.size  = sizeof(field);
+                fi.type  = type_name<FT>();
+                fi.value = stringify<FT>(field);
+                annotate<FT>(fi, field);
+                fields.push_back(std::move(fi));
             }(entry));
         },
         T::eye_describe());
@@ -270,14 +494,33 @@ std::vector<FieldInfo> collect(const T& obj) {
     std::size_t idx = 0;
     visit_fields(obj, [&](const auto& field) {
         using FT = std::remove_cvref_t<decltype(field)>;
-        fields.push_back(FieldInfo{
-            "#" + std::to_string(idx++),
-            static_cast<std::size_t>(
-                reinterpret_cast<const unsigned char*>(std::addressof(field)) -
-                base),
-            sizeof(field), type_name<FT>(), stringify<FT>(field)});
+        FieldInfo fi;
+        fi.name   = "#" + std::to_string(idx++);
+        fi.offset = static_cast<std::size_t>(
+            reinterpret_cast<const unsigned char*>(std::addressof(field)) -
+            base);
+        fi.size  = sizeof(field);
+        fi.type  = type_name<FT>();
+        fi.value = stringify<FT>(field);
+        annotate<FT>(fi, field);
+        fields.push_back(std::move(fi));
     });
     return fields;
+}
+
+// Весь объект как ОДНО «поле» — для скаляров, указателей и std::string,
+// у которых нет разбираемых полей, но схема памяти всё равно нужна.
+template <class T>
+FieldInfo self_field(const T& obj) {
+    FieldInfo fi;
+    fi.name   = std::is_same_v<std::remove_cvref_t<T>, std::string>
+                    ? "строка" : "значение";
+    fi.offset = 0;
+    fi.size   = sizeof(T);
+    fi.type   = type_name<T>();
+    fi.value  = stringify<T>(obj);
+    annotate<T>(fi, obj);
+    return fi;
 }
 
 // Разбор vtable (M3). vptr и динамический тип — портируемо (обе ABI); сырые

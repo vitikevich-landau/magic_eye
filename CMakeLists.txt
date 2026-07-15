@@ -39,7 +39,15 @@ add_executable(m4_guild_registry M4_guild_registry/main.cpp)
 add_library(magic_eye INTERFACE)
 target_include_directories(magic_eye INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/final)
 
-foreach(ex 01_basics 02_creatures 03_tavern_vtable 04_guild_registry)
+foreach(ex 01_basics 02_creatures 03_tavern_vtable 04_guild_registry 05_deep_gaze)
     add_executable(ex${ex} final/examples/${ex}.cpp)
     target_link_libraries(ex${ex} PRIVATE magic_eye)
 endforeach()
+
+# --- регрессии финального инспектора -----------------------------------------
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(magic_eye_tests tests/magic_eye_tests.cpp)
+    target_link_libraries(magic_eye_tests PRIVATE magic_eye)
+    add_test(NAME magic_eye_tests COMMAND magic_eye_tests)
+endif()
