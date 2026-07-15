@@ -88,20 +88,39 @@ public:
 
 Нужны только факты, без рисования (скажем, свой вывод в JSON) — подключай
 `eye/reflect.hpp` и бери `model_of(obj)` / `passport_of<T>()` /
-`type_name<T>()` напрямую. Внешний вид меняется правкой одного `eye/render.hpp`.
+`type_name<T>()` напрямую. Внешний вид меняется правкой файлов `eye/detail/`
+(вид — это `render.hpp`-умбрелла над `detail/view_*.hpp`).
 
 ## Устройство
 
+Header-only: подключаешь один заголовок. Внутри — тонкие «умбреллы» над
+слоями `detail/` по принципу «одна ответственность = один файл».
+
 ```
 include/eye/
-  reflect.hpp   ← МОДЕЛЬ: факты об объекте (типы, поля, базы, vptr).
-                   Ни одного ANSI-кода. Здесь же EYE_DESCRIBE / EYE_BASES.
-  render.hpp    ← ВИД: тема «Гримуар» — рамки, цвет, схема памяти, выноски.
-  magic_eye.hpp ← склейка обоих + eye::inspect()
+  magic_eye.hpp ← публичная склейка: reflect + render + eye::inspect()
+  reflect.hpp   ← МОДЕЛЬ: движок рефлексии (type_name/field_count/gather/…)
+                   + EYE_DESCRIBE / EYE_BASES; включает detail/model_types.hpp
+  render.hpp    ← умбрелла ВИДА: тема «Гримуар v3» над detail/
+  detail/
+    model_types.hpp  ← ШОВ: plain-структуры данных (их и рисует вид)
+    abi.hpp          ← EYE_ITANIUM_ABI (Itanium против MSVC)
+    platform.hpp     ← ОС-слой: консоль, ширина, разворот (ЕДИНСТВЕННЫЙ <windows.h>)
+    palette.hpp      ← ANSI-палитра clr::
+    geometry.hpp     ← раскладка: зоны, ширина, geo_refresh
+    text.hpp         ← ширина/clip/hex + строитель Line
+    frame.hpp        ← рамки: put, две зоны, картуш
+    view_passport.hpp · view_memory.hpp (сердце) · view_hierarchy.hpp ·
+    view_vtable.hpp · view_satellites.hpp   ← секции вывода
 examples/       ← 10 примеров (см. ниже), каждый самостоятелен
 tests/          ← регрессии инспектора (ctest)
+tools/          ← eyerun.sh (Docker-прогон), eye-fullscreen.ps1 (во весь экран)
 docs/legacy/    ← учебные этапы M0–M5 (как всё это строилось «с нуля»)
 ```
+
+Граница «модель ↔ вид» теперь проверяется компилятором: `render.hpp` включает
+из модели ТОЛЬКО `detail/model_types.hpp` и собирается в одиночку, не таща
+движок рефлексии.
 
 ## Примеры
 
