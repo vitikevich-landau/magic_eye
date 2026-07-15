@@ -523,14 +523,21 @@ inline std::vector<Region> build_regions(const std::vector<FieldInfo>& fields,
     auto classify_gap = [&](std::size_t start, std::size_t size,
                             const Region* next) -> Region {
         if (opaque) { Region p{Region::R::opaque, start, size}; p.why = opaque_why; return p; }
+        // Самый ТЕСНЫЙ диапазон: больший offset (глубже), при равном — меньший
+        // размер (под-объект базы точнее, чем «своё хранилище» всего объекта).
         const OpaqueSpan* owner = nullptr;
         for (const OpaqueSpan& s : opaque_spans)
             if (start >= s.offset && start < s.offset + s.size)
-                if (owner == nullptr || s.offset > owner->offset) owner = &s;  // глубже
+                if (owner == nullptr || s.offset > owner->offset ||
+                    (s.offset == owner->offset && s.size < owner->size))
+                    owner = &s;
         if (owner != nullptr) {
             Region p{Region::R::opaque, start, size};
-            p.why = "непрозрачная база «" + clip(owner->name, 20) +
-                    "» — нужен EYE_DESCRIBE";
+            p.why = owner->self
+                ? "свои поля не описаны «" + clip(owner->name, 16) +
+                      "» — нужен EYE_DESCRIBE"
+                : "непрозрачная база «" + clip(owner->name, 20) +
+                      "» — нужен EYE_DESCRIBE";
             return p;
         }
         Region p{Region::R::padding, start, size};

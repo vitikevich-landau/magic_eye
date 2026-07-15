@@ -669,7 +669,8 @@ VtableSite read_vtable_site(const T& obj, std::size_t offset,
 struct OpaqueSpan {
     std::size_t offset = 0;
     std::size_t size = 0;
-    std::string name;   // имя базы — для подписи
+    std::string name;   // имя типа — для подписи
+    bool self = false;  // это СВОЁ хранилище типа (не под-объект базы)
 };
 
 struct ObjectModel {
@@ -745,15 +746,26 @@ void gather(const T& obj, ObjectModel& m, const unsigned char* md_base,
             T::eye_bases());
     }
 
-    // 2b) НЕполиморфный под-объект с virtual-базой всё равно держит служебный
-    //     указатель на virtual-базу в своём начале (Itanium: указатель на vtable
-    //     со смещениями vbase; MSVC: vbptr). Полиморфный уже учтён как vptr выше.
-    if constexpr (!std::is_polymorphic_v<T>) {
-        if (self_has_vbase) {
+    // 2b) Служебный указатель на virtual-базу. Где он лежит — зависит от ABI:
+    //   • Itanium: у НЕполиморфного типа — в начале под-объекта; у полиморфного
+    //     смещения vbase зашиты в его же vtable (vptr уже учтён) — отдельного нет.
+    //   • MSVC: vbptr есть ВСЕГДА при virtual-базе. У неполиморфного — на offset 0;
+    //     у полиморфного — отдельным словом ПОСЛЕ vfptr (vfptr@0, vbptr@8).
+    if (self_has_vbase) {
+        bool record = true;
+        std::size_t vb_off = self_off;
+        if constexpr (std::is_polymorphic_v<T>) {
+#if EYE_ITANIUM_ABI
+            record = false;                     // vbase-смещения внутри vtable
+#else
+            vb_off = self_off + sizeof(void*);  // MSVC: vbptr после vfptr
+#endif
+        }
+        if (record) {
             bool dup = false;
             for (std::size_t o : m.vbase_ptrs)
-                if (o == self_off) { dup = true; break; }
-            if (!dup) m.vbase_ptrs.push_back(self_off);
+                if (o == vb_off) { dup = true; break; }
+            if (!dup) m.vbase_ptrs.push_back(vb_off);
         }
     }
 
@@ -766,6 +778,13 @@ void gather(const T& obj, ObjectModel& m, const unsigned char* md_base,
     //    помечены скрытыми (opaque_bases в п.2) — честнее, чем разложить наугад.
     if constexpr (own_described<T>)
         append_described<T>(obj, md_base, type_name<T>(), depth, m.fields);
+
+    // Свои поля НЕ описаны (тип объявил только EYE_BASES, но добавил члены). Для
+    // ВЕРХНЕГО уровня помечаем собственное хранилище скрытым — иначе его члены
+    // ушли бы в padding. (У баз то же делает opaque-span от родителя в п.2.)
+    if constexpr (!own_described<T>)
+        if (depth == 0)
+            m.opaque_bases.push_back({self_off, sizeof(T), type_name<T>(), true});
 }
 
 template <class T>

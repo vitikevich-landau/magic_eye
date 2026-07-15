@@ -125,6 +125,14 @@ struct PlainDerived : PlainBase2 { int pd = 2; };
 struct EmptyBase {};
 struct EmptyDerived : EmptyBase { int x = 42; };
 
+// --- own EYE_BASES без своего EYE_DESCRIBE, но со СВОИМ полем: поле базы видно,
+//     а собственный член d не должен уйти в padding (помечается скрытым). ------
+struct OwnBaseSrc { int base_v = 1; EYE_DESCRIBE(OwnBaseSrc, base_v) };
+struct OwnBasesOnly : OwnBaseSrc {
+    int d = 2;
+    EYE_BASES(OwnBasesOnly, OwnBaseSrc)   // без своего EYE_DESCRIBE
+};
+
 namespace {
 
 struct LongNames {
@@ -454,6 +462,15 @@ int main() {
     ok &= expect(ed_out.find("добавь EYE_DESCRIBE") != std::string::npos &&
                      ed_out.find("дыра, внутри мусор") == std::string::npos,
                  "empty-base aggregate rendered its member as padding");
+
+    // --- регресс (Codex): own EYE_BASES без EYE_DESCRIBE + свой член — база
+    //     видна, а собственный член скрыт, не padding --------------------------
+    OwnBasesOnly own_bases_only;
+    const std::string obo = render_obj(own_bases_only, 126, "ownbasesonly");
+    ok &= expect(obo.find("из базы OwnBaseSrc") != std::string::npos &&
+                     obo.find("свои поля не описаны") != std::string::npos &&
+                     obo.find("дыра, внутри мусор") == std::string::npos,
+                 "own-bases-only derived member rendered as padding");
 
     return ok ? 0 : 1;
 }
