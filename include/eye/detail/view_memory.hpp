@@ -6,6 +6,7 @@
 #include <cstdint>   // std::uintptr_t — сравнение адресов без UB-серости
 #include <string>
 #include <vector>
+#include "field_mark.hpp"   // add_field_mark — общий с панелью-спутником
 #include "frame.hpp"
 #include "model_types.hpp"
 
@@ -30,27 +31,6 @@ struct Region {
         : what(w), off(o), size(s), f(fi), shade(sh), strpart(sp),
           field_no(no) {}
 };
-
-inline std::string field_mark(std::size_t no) {
-    return no == 0 ? "" : "#" + std::to_string(no);
-}
-
-inline bool has_automatic_name(const FieldInfo& f) {
-    return f.name.size() > 1 && f.name.front() == '#' &&
-           std::all_of(f.name.begin() + 1, f.name.end(),
-                       [](unsigned char c) { return std::isdigit(c) != 0; });
-}
-
-// В авторазборе имя уже выглядит как #0, #1, ... — второй номер только мешал
-// бы. Настоящие имена получают #1, #2, ... и совпадают с панелью-спутником.
-inline std::string field_mark(const FieldInfo& f, std::size_t no) {
-    return has_automatic_name(f) || f.inferred ? "" : field_mark(no);
-}
-
-inline void add_field_mark(Line& l, const FieldInfo& f, std::size_t no) {
-    const std::string mark = field_mark(f, no);
-    if (!mark.empty()) l.col(clr::gold(), mark).sp();
-}
 
 // Диапазон включительный: так без мысленного вычитания видно, какой именно
 // последний байт охватывает скобка справа.

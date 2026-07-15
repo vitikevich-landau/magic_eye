@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <string>
 #include <vector>
+#include "field_mark.hpp"   // add_field_mark — общий со схемой памяти
 #include "frame.hpp"
 #include "model_types.hpp"
 
