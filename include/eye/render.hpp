@@ -156,9 +156,11 @@ inline Geo& geo() { static Geo g; return g; }
 inline std::size_t frame_width() { return geo().frame_w; }
 
 #if defined(_WIN32)
-// Обычный conhost умеет менять размер программно; Windows Terminal/ConPTY
-// может отказать — это нормально, тогда раскладка просто подстроится под него.
-inline void widen_console_once() {
+// «Во весь экран, как в игре»: при первом выводе разворачиваем окно консоли на
+// максимально возможный для текущего шрифта размер. Обычный conhost это умеет;
+// Windows Terminal/ConPTY может проигнорировать — тогда раскладка просто
+// подстроится под текущий размер. EYE_RESIZE=0 отключает авто-разворот.
+inline void maximize_console_once() {
     static const bool done = [] {
         const std::string resize = env_value("EYE_RESIZE");
         if (!resize.empty() && resize.front() == '0') return true;
@@ -169,23 +171,20 @@ inline void widen_console_once() {
         if (h == INVALID_HANDLE_VALUE || !GetConsoleScreenBufferInfo(h, &bi))
             return true;
 
-        const SHORT current =
-            static_cast<SHORT>(bi.srWindow.Right - bi.srWindow.Left + 1);
+        // Ширина БУФЕРА должна вмещать будущее окно, иначе развернуть на полную
+        // не выйдет (окно упрётся в буфер). Только РАСТИМ ширину — высоту-
+        // scrollback не трогаем, чтобы не потерять историю и не прокрутить вид.
         const COORD largest = GetLargestConsoleWindowSize(h);
-        const SHORT desired = static_cast<SHORT>(
-            std::min<std::size_t>(DEFAULT_TERM_W,
-                                  largest.X > 0 ? largest.X : current));
-        if (desired <= current) return true;
-
-        const SHORT required = static_cast<SHORT>(bi.srWindow.Left + desired);
-        if (bi.dwSize.X < required) {
-            COORD size = bi.dwSize;
-            size.X = required;
-            if (!SetConsoleScreenBufferSize(h, size)) return true;
+        if (largest.X > 0 && bi.dwSize.X < largest.X) {
+            COORD buf = bi.dwSize;
+            buf.X = largest.X;
+            SetConsoleScreenBufferSize(h, buf);   // отказ не критичен
         }
-        SMALL_RECT window = bi.srWindow;
-        window.Right = static_cast<SHORT>(window.Left + desired - 1);
-        SetConsoleWindowInfo(h, TRUE, &window); // отказ не критичен
+
+        // Развернуть само окно консоли «во весь экран» (как кнопка «развернуть»):
+        // и по ширине, и по высоте. Позицию и размер под монитор выберет система.
+        if (const HWND hwnd = GetConsoleWindow())
+            ShowWindow(hwnd, SW_MAXIMIZE);
         return true;
     }();
     (void)done;
@@ -199,7 +198,7 @@ inline std::size_t term_width() {
         if (const int v = std::atoi(width.c_str()); v > 0)
             return static_cast<std::size_t>(v);
 #if defined(_WIN32)
-    widen_console_once();
+    maximize_console_once();
     CONSOLE_SCREEN_BUFFER_INFO bi;
     const HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
     if (h != INVALID_HANDLE_VALUE && GetConsoleScreenBufferInfo(h, &bi))
