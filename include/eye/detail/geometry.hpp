@@ -112,11 +112,10 @@ inline std::size_t term_width() {
     return DEFAULT_TERM_W;
 }
 
-// Пересчитать раскладку перед каждой панелью (окно могли растянуть).
-inline void geo_refresh() {
+// Раскладка панели под ЗАДАННУЮ ширину w (колонок всего). Общая для
+// geo_refresh (w = ширина терминала) и TUI (w = ширина зоны деталей).
+inline Geo compute_geo(std::size_t w, bool full) {
     Geo g;
-    const std::size_t w = term_width();
-
     // Широкий режим «две зоны»: карта байт ║ кодекс в ОДНОЙ рамке. Включается,
     // когда влезают обе зоны с рамкой (2 + MAP_W + 1 + CODEX_MIN + 2).
     const std::size_t two_zone_min = 2 + MAP_W + 1 + CODEX_MIN + 2;
@@ -132,10 +131,17 @@ inline void geo_refresh() {
         const std::size_t available = w > 4 ? w - 4 : MIN_FRAME_W;
         g.frame_w = std::clamp(available, MIN_FRAME_W, PREF_FRAME_W);
     }
-    g.full = [] {
+    g.full = full;
+    return g;
+}
+
+// Пересчитать раскладку перед каждой панелью (окно могли растянуть).
+inline void geo_refresh() {
+    const std::size_t w = term_width();
+    Geo g = compute_geo(w, [] {
         const std::string value = env_value("EYE_FULL");
         return !value.empty() && value.front() == '1';
-    }();
+    }());
     const bool center = [] {
         const std::string value = env_value("EYE_CENTER");
         return value.empty() || value.front() != '0';
