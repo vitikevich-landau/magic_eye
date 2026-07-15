@@ -59,6 +59,13 @@ if(BUILD_TESTING)
     set_tests_properties(tui_core_tests PROPERTIES
         ENVIRONMENT "EYE_COLOR=0;EYE_CENTER=0;EYE_RESIZE=0")
 
+    # Странствие (explore/Gallery): снапшоты кадров через EYE_SCRIPT.
+    add_executable(explore_script_tests tests/explore_script_tests.cpp)
+    target_link_libraries(explore_script_tests PRIVATE magic_eye)
+    add_test(NAME explore_script_tests COMMAND explore_script_tests)
+    set_tests_properties(explore_script_tests PROPERTIES
+        ENVIRONMENT "EYE_COLOR=0;EYE_CENTER=0;EYE_RESIZE=0")
+
     # Ручная проба TUI (стрелки/resize/выход) — собирается, в ctest не входит.
     add_executable(tui_demo tests/tui_demo.cpp)
     target_link_libraries(tui_demo PRIVATE magic_eye)

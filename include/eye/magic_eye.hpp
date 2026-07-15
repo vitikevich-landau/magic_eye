@@ -43,6 +43,7 @@
 #include "reflect.hpp"   // модель: факты об объекте (+ макрос EYE_DESCRIBE)
 #include "render.hpp"    // вид: рамки, цвет, схема памяти, выноски
 #include "detail/panel_object.hpp"   // панель объекта: модель+вид разом
+#include "explore.hpp"   // странствие: eye::explore / eye::Gallery (TUI)
 
 namespace eye {
 

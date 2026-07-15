@@ -1,0 +1,501 @@
+// ОКО МАГА / eye/detail/nav/nav_build.hpp — СТРОИТЕЛЬ навигационного графа.
+//   Превращает живой объект в дерево NavNode с ленивыми детьми. Диспетчер тот
+//   же, что у панели inspect: свой реестр > адаптеры std > автоматика >
+//   честное «скрыто». Замыкания захватывают ТИПИЗИРОВАННЫЕ ссылки (адрес +
+//   тип известны на этапе компиляции), поэтому раскрытие узла и — в M-D —
+//   переход по указателю строят детей без потери типа.
+//
+//   Слой-склейка (как panel_object.hpp): знает и движок модели, и вид.
+//   Контракт времени жизни: объекты галереи и всё достижимое из них живут,
+//   пока идёт Gallery::run() — то же требование, что у inspect, растянутое
+//   на время странствия.
+#pragma once
+#include <array>
+#include <cstddef>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include "../panel_object.hpp"   // render_object_panel + модель + вид
+#include "nav_node.hpp"
+
+namespace eye::detail::nav {
+
+inline constexpr std::size_t NAV_PAGE = 100;   // страница элементов коллекции
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Панели деталей (рисуют в активный Surface по текущей geo())
+// ────────────────────────────────────────────────────────────────────────────
+
+// Чистый hex-дамп диапазона узла (режим [x]): те же строки-сетки, что карта
+// памяти, но без выносок — просто байты с абсолютной колонкой offset mod 8.
+inline void render_hex_panel(const std::string& title, const void* addr,
+                             std::size_t size, std::size_t start_off = 0) {
+    frame_top(title + " · hex");
+    if (addr == nullptr || size == 0) {
+        put_text("байтов нет: у узла нет адреса (или размер 0)");
+        frame_bottom();
+        return;
+    }
+    put_text("объём " + std::to_string(size) + " Б @ " + hexptr(addr));
+    Line h;
+    h.col(clr::grey(), "off").to(MEM_HEX_COL);
+    for (int i = 0; i < 8; ++i)
+        h.col(clr::dim(), "+" + std::to_string(i)).sp(i == 7 ? 0 : 1);
+    h.to(MEM_ASCII_COL).col(clr::dim(), "ascii");
+    put(h);
+    const auto* base =
+        static_cast<const unsigned char*>(addr) - start_off;   // база строк
+    FieldInfo probe;               // регион «поле» без выносок — только глиф
+    probe.name = title;
+    probe.offset = start_off;
+    probe.size = size;
+    const Region r{Region::R::field, start_off, size, &probe, false, 0, 0};
+    for (const MRow& row : region_rows(start_off, size))
+        put(mem_row(row, r, base));
+    frame_bottom();
+}
+
+// Паспорт-панель поля (режим [p]): тип/размер/выравнивание/offset/владелец.
+inline void render_field_passport(const FieldInfo& f) {
+    frame_top(f.name);
+    frame_sep("паспорт поля");
+    Line l1;
+    l1.col(clr::grey(), "тип ").col(clr::cyan(), clip(f.type, frame_width() - 4));
+    put(l1);
+    Line l2;
+    l2.col(clr::grey(), "размер ").col(clr::cyan(), std::to_string(f.size))
+      .col(clr::grey(), " Б · выравнивание ")
+      .col(clr::cyan(), std::to_string(f.align))
+      .col(clr::grey(), " Б · offset ")
+      .col(clr::green(), "+" + hex4(f.offset));
+    put(l2);
+    if (!f.owner.empty()) {
+        Line l3;
+        l3.col(clr::grey(), f.base_depth > 0 ? "из базы " : "владелец ")
+          .col(clr::cyan(), clip(f.owner, frame_width() - 10));
+        put(l3);
+    }
+    if (f.inferred)
+        put_text("≈ адресный слот (корреляция по адресам, не имя из ABI)");
+    frame_bottom();
+}
+
+// Память-панель поля (режим [m], по умолчанию): байты региона + выноски.
+inline void render_field_memory(const FieldInfo& f, const void* obj_base,
+                                std::size_t obj_size) {
+    frame_top(f.name);
+    frame_sep("память · " + byte_range(f.offset, f.size));
+    const auto* base = static_cast<const unsigned char*>(obj_base);
+    Line h;
+    h.col(clr::grey(), "off").to(MEM_HEX_COL);
+    for (int i = 0; i < 8; ++i)
+        h.col(clr::dim(), "+" + std::to_string(i)).sp(i == 7 ? 0 : 1);
+    h.to(MEM_ASCII_COL).col(clr::dim(), "ascii");
+    put(h);
+    const Region r{Region::R::field, f.offset, f.size, &f, false, 0, 1};
+    for (const MRow& row : region_rows(f.offset, f.size))
+        put(mem_row(row, r, base));
+    const auto notes =
+        region_notes(r, base, obj_size, /*standalone*/ true,
+                     frame_width() > 8 ? frame_width() - 8 : frame_width());
+    for (std::size_t i = 0; i < notes.size(); ++i) {
+        Line l;
+        l.to(3).col(clr::grey(), i == 0 ? "└► " : "   ");
+        l.s += notes[i].s;
+        l.w += notes[i].w;
+        put(l);
+    }
+    frame_bottom();
+}
+
+// Общий детальный рендер поля: раскидывает по режимам.
+inline void render_field_detail(const FieldInfo& f, const void* obj_base,
+                                std::size_t obj_size, DetailMode m) {
+    switch (m) {
+        case DetailMode::passport: render_field_passport(f); break;
+        case DetailMode::hex:
+            render_hex_panel(f.name,
+                             static_cast<const unsigned char*>(obj_base) +
+                                 f.offset,
+                             f.size, f.offset);
+            break;
+        default: render_field_memory(f, obj_base, obj_size); break;
+    }
+}
+
+// vptr-панель: блок-диаграмма vtable этого сайта.
+inline void render_vptr_detail(const VtableSite& site, std::size_t obj_size,
+                               DetailMode m) {
+    if (m == DetailMode::hex) {
+        render_hex_panel("vptr", &site.vptr, sizeof(void*));
+        return;
+    }
+    frame_top("vptr «" + site.owner + "»");
+    frame_sep("vtable — гримуар рода (как работает virtual)");
+    render_vtables({site}, obj_size);
+    frame_bottom();
+}
+
+// Спутник-панель: кучный буфер строки (мини-рамка из view_satellites).
+inline void render_satellite_detail(const FieldInfo& f, const void* obj_addr,
+                                    DetailMode m) {
+    if (m == DetailMode::hex && f.target != nullptr) {
+        render_hex_panel("буфер «" + f.name + "»", f.target,
+                         f.heap_bytes.size());
+        return;
+    }
+    render_satellites({f}, obj_addr);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Узлы-примитивы
+// ────────────────────────────────────────────────────────────────────────────
+
+inline NavNode make_note_node(std::string text) {
+    NavNode n;
+    n.kind = NodeKind::note;
+    n.title = std::move(text);
+    n.detail = [t = n.title](DetailMode) {
+        frame_top("заметка");
+        put_text(t);
+        frame_bottom();
+    };
+    return n;
+}
+
+inline NavNode make_opaque_node(const OpaqueSpan& span, const void* obj_base) {
+    NavNode n;
+    n.kind = NodeKind::opaque;
+    n.title = span.self ? "свои поля не описаны" : "скрыто: " + span.name;
+    n.type = span.name;
+    n.suffix = "+" + hex4(span.offset);
+    n.addr = static_cast<const unsigned char*>(obj_base) + span.offset;
+    n.size = span.size;
+    n.detail = [span, obj_base](DetailMode m) {
+        if (m == DetailMode::hex) {
+            render_hex_panel(span.name,
+                             static_cast<const unsigned char*>(obj_base) +
+                                 span.offset,
+                             span.size, span.offset);
+            return;
+        }
+        frame_top(span.name + " · туман");
+        put_text(span.self
+                     ? "собственные члены типа не перечислены в EYE_DESCRIBE"
+                     : "непрозрачная база: нет своего EYE_DESCRIBE");
+        put_text("байты честно скрыты (не выдаём за padding)");
+        put_text("добавь EYE_DESCRIBE — Око увидит поля и private");
+        frame_bottom();
+    };
+    return n;
+}
+
+// Спутник кучной строки (child поля-строки).
+inline NavNode make_satellite_node(const FieldInfo& f, const void* obj_addr) {
+    NavNode n;
+    n.kind = NodeKind::satellite;
+    n.title = "буфер кучи «" + f.name + "»";
+    n.type = "куча";
+    n.preview = std::to_string(f.str_len) + "/" + std::to_string(f.str_cap);
+    n.suffix = "@" + hexptr(f.target);
+    n.addr = f.target;
+    n.size = f.heap_bytes.size();
+    n.detail = [f, obj_addr](DetailMode m) {
+        render_satellite_detail(f, obj_addr, m);
+    };
+    return n;
+}
+
+// Узел обычного поля (FieldInfo снят в момент раскрытия родителя; байты в
+// панели памяти читаются живьём при каждой отрисовке).
+inline NavNode make_field_node(FieldInfo f, const void* obj_base,
+                               std::size_t obj_size) {
+    NavNode n;
+    n.kind = NodeKind::field;
+    n.title = f.name;
+    n.type = f.type;
+    // Превью коротким клипом: полная версия — в панели деталей.
+    if (f.value != "—" && !f.value.empty()) n.preview = "= " + clip(f.value, 16);
+    n.suffix = "+" + hex4(f.offset);
+    n.addr = static_cast<const unsigned char*>(obj_base) + f.offset;
+    n.size = f.size;
+    if (f.kind == FieldInfo::Kind::str) {
+        n.preview = "= " + clip(f.value, 12) + (f.sso ? " (SSO)" : " (куча)");
+        if (!f.sso && !f.heap_bytes.empty()) {
+            n.can_expand = true;
+            n.expand = [f, obj_base]() {
+                return std::vector<NavNode>{make_satellite_node(f, obj_base)};
+            };
+        }
+    }
+    if (f.kind == FieldInfo::Kind::pointer) {
+        n.preview = "→ " + f.value;
+        // Переходы по указателям приходят в M-D; причину объясняем уже сейчас.
+        n.follow_block = f.target == nullptr
+                             ? "переход невозможен: nullptr"
+                             : "переход по указателю — в следующем этапе";
+    }
+    n.detail = [f, obj_base, obj_size](DetailMode m) {
+        render_field_detail(f, obj_base, obj_size, m);
+    };
+    return n;
+}
+
+inline NavNode make_vptr_node(const VtableSite& site, std::size_t obj_size) {
+    NavNode n;
+    n.kind = NodeKind::vptr;
+    n.title = site.owner.empty() ? "vptr" : "vptr «" + site.owner + "»";
+    n.type = "→ vtable " + site.dyn_type;
+    n.suffix = "+" + hex4(site.offset);
+    n.size = sizeof(void*);
+    n.has_vtable = true;
+    n.detail = [site, obj_size](DetailMode m) {
+        render_vptr_detail(site, obj_size, m);
+    };
+    return n;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Объектные узлы (типизированная рекурсия — прямой родич gather)
+// ────────────────────────────────────────────────────────────────────────────
+
+template <class T>
+NavNode make_object_node(const T& obj, std::string label = "",
+                         NodeKind kind = NodeKind::object);
+
+// Дети объекта со СВОИМ реестром: базы (рекурсивно объектные узлы) + свои
+// поля + vptr-сайты (все, с владельцами) + скрытые диапазоны.
+template <class T>
+    requires(own_described<T> || own_bases<T>)
+std::vector<NavNode> make_registry_children(const T& obj) {
+    std::vector<NavNode> kids;
+    const auto* base = reinterpret_cast<const unsigned char*>(std::addressof(obj));
+
+    // 1) под-объекты баз — каждый раскрывается как самостоятельный объект.
+    if constexpr (own_bases<T>) {
+        std::apply(
+            [&](auto... tag) {
+                (..., [&](auto t) {
+                    using B = typename decltype(t)::type;
+                    const B& b = static_cast<const B&>(obj);
+                    const auto off = static_cast<std::size_t>(
+                        reinterpret_cast<const unsigned char*>(
+                            std::addressof(b)) -
+                        base);
+                    NavNode bn = make_object_node<B>(
+                        b, "база " + type_name<B>(), NodeKind::base);
+                    bn.suffix = "+" + hex4(off);
+                    if (is_virtual_base_v<T, B>) bn.preview = "[virtual]";
+                    kids.push_back(std::move(bn));
+                }(tag));
+            },
+            T::eye_bases());
+    }
+
+    // 2) свои поля (только собственный реестр — поля баз внутри узлов баз).
+    if constexpr (own_described<T>) {
+        std::vector<FieldInfo> own;
+        append_described<T>(obj, base, type_name<T>(), 0, own);
+        std::sort(own.begin(), own.end(),
+                  [](const FieldInfo& a, const FieldInfo& b) {
+                      return a.offset < b.offset;
+                  });
+        for (FieldInfo& f : own)
+            kids.push_back(make_field_node(std::move(f), base, sizeof(T)));
+    } else {
+        kids.push_back(make_note_node(
+            "свои поля не описаны — нужен EYE_DESCRIBE"));
+    }
+
+    // 3) vptr-сайты уровня T (модель собирает и сайты баз — те покажут свои).
+    if constexpr (std::is_polymorphic_v<T>)
+        kids.push_back(make_vptr_node(
+            read_vtable_site(obj, 0, type_name<T>()), sizeof(T)));
+
+    return kids;
+}
+
+// Страница элементов вектора [from, from+NAV_PAGE) + узел «ещё…» при остатке.
+// Свободная функция, а не рекурсивная лямбда: замыкание «ещё…» живёт дольше
+// кадра, ссылка на локальную лямбду была бы висячей.
+template <class E, class A>
+std::vector<NavNode> make_vector_elem_page(const std::vector<E, A>* pv,
+                                           std::size_t from) {
+    std::vector<NavNode> page;
+    const std::size_t upto = std::min(from + NAV_PAGE, pv->size());
+    const auto* data = reinterpret_cast<const unsigned char*>(pv->data());
+    for (std::size_t i = from; i < upto; ++i) {
+        FieldInfo fi;
+        fi.name = "#" + std::to_string(i);
+        fi.offset = i * sizeof(E);
+        fi.size = sizeof(E);
+        fi.align = alignof(E);
+        fi.type = type_name<E>();
+        fi.value = stringify((*pv)[i]);
+        annotate(fi, (*pv)[i]);
+        page.push_back(
+            make_field_node(std::move(fi), data, pv->size() * sizeof(E)));
+    }
+    if (upto < pv->size()) {
+        NavNode more;
+        more.kind = NodeKind::more;
+        more.title = "⋯ ещё " + std::to_string(pv->size() - upto) + " — Enter";
+        more.can_expand = true;
+        more.expand = [pv, upto]() { return make_vector_elem_page(pv, upto); };
+        page.push_back(std::move(more));
+    }
+    return page;
+}
+
+// Дети std::vector: адресные слоты объекта + узел внешнего массива.
+template <class E, class A>
+std::vector<NavNode> make_vector_children(const std::vector<E, A>& v) {
+    std::vector<NavNode> kids;
+    const VectorInfo info = vector_info(v);
+    const auto* base = reinterpret_cast<const unsigned char*>(std::addressof(v));
+    for (const FieldInfo& slot : info.slots)
+        kids.push_back(make_field_node(slot, base, sizeof(v)));
+    if (!info.slots_matched && !info.bit_packed && info.data != nullptr)
+        kids.push_back(make_note_node(
+            "≈ адресные слоты не распознаны — не называем их наугад"));
+
+    if (info.bit_packed) {
+        kids.push_back(make_note_node(
+            "vector<bool>: биты упакованы, data() недоступен"));
+        return kids;
+    }
+    if (info.data == nullptr || info.size == 0) {
+        kids.push_back(make_note_node("внешнего массива нет: vector пуст"));
+        return kids;
+    }
+
+    // Узел «элементы»: страницы по NAV_PAGE через узел more.
+    NavNode elems;
+    elems.kind = NodeKind::elems;
+    elems.title = "элементы";
+    elems.type = info.element_type + "[" + std::to_string(info.size) + "]";
+    elems.suffix = "@" + hexptr(info.data);
+    elems.addr = info.data;
+    elems.size = info.heap_used;
+    elems.can_expand = true;
+    const std::vector<E, A>* pv = std::addressof(v);
+    elems.expand = [pv]() { return make_vector_elem_page(pv, 0); };
+    elems.detail = [pv](DetailMode m) {
+        if (m == DetailMode::hex) {
+            render_hex_panel("элементы", pv->data(),
+                             pv->size() * sizeof(E));
+            return;
+        }
+        render_vector_satellite(vector_info(*pv), pv);
+    };
+    kids.push_back(std::move(elems));
+    return kids;
+}
+
+// Дети «просто объекта» — диспетчер по типу (зеркало panel_object).
+template <class T>
+std::vector<NavNode> make_children(const T& obj) {
+    const auto* base = reinterpret_cast<const unsigned char*>(std::addressof(obj));
+    if constexpr (own_described<T> || own_bases<T>) {
+        return make_registry_children(obj);
+    } else if constexpr (std::is_same_v<T, std::string>) {
+        std::vector<NavNode> kids;
+        FieldInfo f = self_field(obj);
+        if (!f.sso && !f.heap_bytes.empty())
+            kids.push_back(make_satellite_node(f, base));
+        else
+            kids.push_back(make_note_node(
+                "SSO: буфер прямо в объекте, кучи нет"));
+        return kids;
+    } else if constexpr (is_std_vector_v<T>) {
+        return make_vector_children(obj);
+    } else if constexpr (is_std_array_v<T>) {
+        std::vector<NavNode> kids;
+        for (FieldInfo& f : collect_array(obj))
+            kids.push_back(make_field_node(std::move(f), base, sizeof(T)));
+        return kids;
+    } else if constexpr (std::is_class_v<T> && std::is_aggregate_v<T> &&
+                         std::is_standard_layout_v<T> && !described<T> &&
+                         !has_bases<T>) {
+        std::vector<NavNode> kids;
+        if constexpr (field_count<T>() > 0 && field_count<T>() <= 8) {
+            for (FieldInfo& f : collect(obj))
+                kids.push_back(make_field_node(std::move(f), base, sizeof(T)));
+        } else {
+            kids.push_back(make_note_node(
+                "агрегат не разобрать автоматикой — добавь EYE_DESCRIBE"));
+        }
+        if constexpr (std::is_polymorphic_v<T>)
+            kids.push_back(make_vptr_node(
+                read_vtable_site(obj, 0, type_name<T>()), sizeof(T)));
+        return kids;
+    } else if constexpr (std::is_class_v<T>) {
+        std::vector<NavNode> kids;
+        kids.push_back(make_note_node(
+            "непрозрачный класс: private/конструкторы — нужен EYE_DESCRIBE"));
+        if constexpr (std::is_polymorphic_v<T>)
+            kids.push_back(make_vptr_node(
+                read_vtable_site(obj, 0, type_name<T>()), sizeof(T)));
+        return kids;
+    } else {
+        return {};   // скаляр/указатель — лист, вся правда в панели деталей
+    }
+}
+
+// Объектный узел: заголовок + полная панель (как inspect) в деталях +
+// ленивые дети make_children. kind: root — корень галереи, base — под-объект,
+// object — pointee (M-D).
+template <class T>
+NavNode make_object_node(const T& obj, std::string label, NodeKind kind) {
+    NavNode n;
+    n.kind = kind;
+    n.title = label.empty() ? type_name<T>() : std::move(label);
+    n.type = type_name<T>();
+    n.addr = std::addressof(obj);
+    n.size = sizeof(T);
+    n.suffix = "@" + hexptr(std::addressof(obj));
+    n.has_vtable = std::is_polymorphic_v<T>;
+    if constexpr (!std::is_class_v<T>) {
+        FieldInfo f = self_field(obj);
+        n.preview = "= " + f.value;
+    }
+    const T* p = std::addressof(obj);
+    n.can_expand = true;
+    n.expand = [p]() { return make_children<T>(*p); };
+    n.detail = [p, title = n.title](DetailMode m) {
+        if (m == DetailMode::hex) {
+            render_hex_panel(title, p, sizeof(T));
+            return;
+        }
+        // Паспорт/память/vtable — секции и так внутри полной панели объекта.
+        render_object_panel(*p, title);
+    };
+    n.print_static = [p, title = n.title]() {
+        geo_refresh();
+        emit_line("");
+        render_object_panel(*p, title);
+        emit_line("");
+    };
+    return n;
+}
+
+// Корень «статика типа» (объекта нет — только паспорт).
+template <class T>
+NavNode make_type_node() {
+    NavNode n;
+    n.kind = NodeKind::root;
+    n.title = type_name<T>() + " · статика";
+    n.type = type_name<T>();
+    n.detail = [](DetailMode) { render_type_panel<T>(); };
+    n.print_static = []() {
+        geo_refresh();
+        emit_line("");
+        render_type_panel<T>();
+        emit_line("");
+    };
+    return n;
+}
+
+} // namespace eye::detail::nav

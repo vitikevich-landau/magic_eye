@@ -38,6 +38,10 @@ public:
 
     TermSize size() const { return size_; }
 
+    // Прямой доступ к строкам ТЕКУЩЕГО кадра (между begin_frame и end_frame).
+    // Нужен скриптовому режиму EYE_SCRIPT: кадры печатаются как текст.
+    const std::vector<std::string>& rows() const { return cur_; }
+
     // Положить готовую ANSI-строку в (row, col), не шире max_w колонок.
     // Обрезка закрывает цвет (clip_ansi добавляет reset) — сосед не «красится».
     void blit(std::size_t row, std::size_t col, const StyledLine& line,
