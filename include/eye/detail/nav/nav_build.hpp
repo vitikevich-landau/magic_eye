@@ -611,8 +611,20 @@ std::vector<NavNode> make_children(const T& obj) {
         return kids;
     } else if constexpr (std::is_class_v<T>) {
         std::vector<NavNode> kids;
-        kids.push_back(make_note_node(
-            "непрозрачный класс: private/конструкторы — нужен EYE_DESCRIBE"));
+        // Плоский агрегат, отвергнутый ровно проверкой standard-layout выше, —
+        // это НЕ private/конструкторы. Дерево обязано говорить то же, что
+        // панель памяти (см. panel_object — там же и разбор причины).
+        if constexpr (std::is_aggregate_v<T> && !described<T> && !has_bases<T>) {
+            kids.push_back(make_note_node(
+                "агрегат, но не standard-layout — авторазбора нет"));
+            kids.push_back(make_note_node(
+                "причина: поле std::string (MSVC Debug) или база с данными"));
+            kids.push_back(make_note_node(
+                "добавь EYE_DESCRIBE — Око увидит поля с именами"));
+        } else {
+            kids.push_back(make_note_node(
+                "непрозрачный класс: private/конструкторы — нужен EYE_DESCRIBE"));
+        }
         if constexpr (std::is_polymorphic_v<T>)
             kids.push_back(make_vptr_node(
                 read_vtable_site(obj, 0, type_name<T>()), base, sizeof(T)));

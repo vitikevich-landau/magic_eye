@@ -55,6 +55,7 @@ void render_object_panel(const T& obj, const std::string& label = "") {
     d::VectorInfo vector;
     std::string src;            // откуда взялись имена — приписка к заголовку
     bool opaque = false;        // содержимое скрыто (нет способа разобрать)
+    std::string opaque_note;    // ТОЧНАЯ причина «скрыто» (пусто — общая)
     bool standalone = false;    // объект = одно значение (скаляр, строка)
     bool vector_mode = false;
 
@@ -105,6 +106,21 @@ void render_object_panel(const T& obj, const std::string& label = "") {
         }
     } else if constexpr (std::is_class_v<T>) {
         opaque = true;          // конструкторы/private/базы/чужой реестр — нужен EYE_DESCRIBE
+        // Отдельный случай: это ПЛОСКИЙ агрегат (все поля публичны, своих баз
+        // в реестре нет), и отвергла его ровно проверка standard-layout выше.
+        // standard-layout ЗАРАЗЕН: его теряет весь агрегат, если хоть одно поле
+        // не standard-layout. Живой пример — std::string в MSVC Debug (/MDd →
+        // _ITERATOR_DEBUG_LEVEL=2 добавляет в строку debug-proxy: 40 Б вместо
+        // 32 и SL=0), тогда как на libstdc++ и в MSVC Release SL=1 и тот же тип
+        // разбирается автоматикой. Отсюда «на Linux работает, в VS непрозрачный».
+        // Врать про «private/конструкторы» тут нельзя: их нет. Вторая причина
+        // сюда же — агрегат с базой, несущей данные (structured bindings его не
+        // раскладывают), поэтому std::string помечен вопросом, а не утверждением.
+        // Строка короткая: колонка выносок узкая (клип по бюджету ~53), и фразу
+        // «добавь EYE_DESCRIBE» держим — на неё смотрит регрессия.
+        if constexpr (std::is_aggregate_v<T> && !d::described<T> &&
+                      !d::has_bases<T>)
+            opaque_note = "не standard-layout (std::string?) добавь EYE_DESCRIBE";
     } else {
         fields.push_back(d::self_field(obj));   // скаляр или указатель
         standalone = true;
@@ -130,7 +146,7 @@ void render_object_panel(const T& obj, const std::string& label = "") {
     d::frame_sep("память · объект @ " + d::hexptr(&obj) + src);
     d::render_memory(fields, sizeof(T), alignof(T), vptr_offsets, vbase_offsets,
                      &obj, opaque, standalone,
-                     vector_mode ? &vector : nullptr, opaque_bases);
+                     vector_mode ? &vector : nullptr, opaque_bases, opaque_note);
 
     // --- vtable для полиморфных (у множественного наследования — несколько) ---
     if (!sites.empty()) {
