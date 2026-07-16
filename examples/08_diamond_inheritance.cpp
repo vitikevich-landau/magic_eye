@@ -46,11 +46,14 @@ public:
 };
 
 int main() {
-    // Отдельная ветвь ромба: у Mage своя Being (offset смотри в «иерархии»).
-    Mage mage;
-    eye::inspect(mage, "маг (Mage : virtual Being)");
+    // ТЕРМИНАЛ → интерактивный обозреватель. Раскрой паладина: под-объекты баз
+    // помечены [virtual], а общий Being показан один раз. Стрелки/Enter/q,
+    // ? — помощь. Пайп/файл → те же панели статикой.
+    Mage    mage;      // отдельная ветвь ромба: у Mage своя Being
+    Paladin paladin;   // полный ромб: Being — общий, один на двоих
 
-    // Полный ромб: Being общий — Око покажет его один раз и пометит.
-    Paladin paladin;
-    eye::inspect(paladin, "паладин (ромб Mage+Warrior→Being)");
+    eye::Gallery{}
+        .add(mage,    "маг (Mage : virtual Being)")
+        .add(paladin, "паладин (ромб Mage+Warrior→Being)")
+        .run();
 }

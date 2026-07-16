@@ -42,9 +42,14 @@ public:
 };
 
 int main() {
-    Knight knight;
-    eye::inspect(knight, "рыцарь (Knight : Unit)");
-
+    // ТЕРМИНАЛ → интерактивный обозреватель. Раскрой корень — под ним узел
+    // «база Unit»; спустись в него, увидишь унаследованные (в т.ч. private)
+    // поля базы с их offset'ами. Стрелки/Enter/q, ? — помощь. Пайп → статика.
+    Knight  knight;
     Paladin paladin;
-    eye::inspect(paladin, "паладин (Paladin : Knight : Unit)");
+
+    eye::Gallery{}
+        .add(knight,  "рыцарь (Knight : Unit)")
+        .add(paladin, "паладин (Paladin : Knight : Unit)")
+        .run();
 }

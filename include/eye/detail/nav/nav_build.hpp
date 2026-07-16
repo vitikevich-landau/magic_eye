@@ -514,6 +514,9 @@ std::vector<NavNode> make_vector_elem_page(const std::vector<E, A>* pv,
 }
 
 // Дети std::vector: адресные слоты объекта + узел внешнего массива.
+// vector<bool> отсечён на КОМПИЛЯЦИИ (if constexpr, а не рантайм-if): у него
+// data() удалён, поэтому ветку с внешним массивом для bool нельзя даже
+// инстанцировать — рантайм-проверки bit_packed тут мало.
 template <class E, class A>
 std::vector<NavNode> make_vector_children(const std::vector<E, A>& v) {
     std::vector<NavNode> kids;
@@ -521,41 +524,42 @@ std::vector<NavNode> make_vector_children(const std::vector<E, A>& v) {
     const auto* base = reinterpret_cast<const unsigned char*>(std::addressof(v));
     for (const FieldInfo& slot : info.slots)
         kids.push_back(make_field_node(slot, base, sizeof(v)));
-    if (!info.slots_matched && !info.bit_packed && info.data != nullptr)
-        kids.push_back(make_note_node(
-            "≈ адресные слоты не распознаны — не называем их наугад"));
 
-    if (info.bit_packed) {
+    if constexpr (std::is_same_v<E, bool>) {
         kids.push_back(make_note_node(
             "vector<bool>: биты упакованы, data() недоступен"));
         return kids;
-    }
-    if (info.data == nullptr || info.size == 0) {
-        kids.push_back(make_note_node("внешнего массива нет: vector пуст"));
+    } else {
+        if (!info.slots_matched && info.data != nullptr)
+            kids.push_back(make_note_node(
+                "≈ адресные слоты не распознаны — не называем их наугад"));
+        if (info.data == nullptr || info.size == 0) {
+            kids.push_back(make_note_node("внешнего массива нет: vector пуст"));
+            return kids;
+        }
+
+        // Узел «элементы»: страницы по NAV_PAGE через узел more.
+        NavNode elems;
+        elems.kind = NodeKind::elems;
+        elems.title = "элементы";
+        elems.type = info.element_type + "[" + std::to_string(info.size) + "]";
+        elems.suffix = "@" + hexptr(info.data);
+        elems.addr = info.data;
+        elems.size = info.heap_used;
+        elems.can_expand = true;
+        const std::vector<E, A>* pv = std::addressof(v);
+        elems.expand = [pv]() { return make_vector_elem_page(pv, 0); };
+        elems.detail = [pv](DetailMode m) {
+            if (m == DetailMode::hex) {
+                render_hex_panel("элементы", pv->data(),
+                                 pv->size() * sizeof(E));
+                return;
+            }
+            render_vector_satellite(vector_info(*pv), pv);
+        };
+        kids.push_back(std::move(elems));
         return kids;
     }
-
-    // Узел «элементы»: страницы по NAV_PAGE через узел more.
-    NavNode elems;
-    elems.kind = NodeKind::elems;
-    elems.title = "элементы";
-    elems.type = info.element_type + "[" + std::to_string(info.size) + "]";
-    elems.suffix = "@" + hexptr(info.data);
-    elems.addr = info.data;
-    elems.size = info.heap_used;
-    elems.can_expand = true;
-    const std::vector<E, A>* pv = std::addressof(v);
-    elems.expand = [pv]() { return make_vector_elem_page(pv, 0); };
-    elems.detail = [pv](DetailMode m) {
-        if (m == DetailMode::hex) {
-            render_hex_panel("элементы", pv->data(),
-                             pv->size() * sizeof(E));
-            return;
-        }
-        render_vector_satellite(vector_info(*pv), pv);
-    };
-    kids.push_back(std::move(elems));
-    return kids;
 }
 
 // Дети «просто объекта» — диспетчер по типу (зеркало panel_object).
