@@ -122,9 +122,17 @@ public:
         prev_winch_ = std::signal(SIGWINCH, eye_term_on_winch);
 #endif
         r.active = true;
+        // Смертельные сигналы ИЗВНЕ (kill -INT/-QUIT/-TERM/-HUP) убивают процесс
+        // действием по умолчанию, минуя и деструктор, и atexit, — терминал
+        // остался бы в raw-режиме на alt-экране. Ctrl-C, набранный в САМОМ
+        // терминале, сюда не приходит (ISIG снят) и обрабатывается байтом 0x03,
+        // но внешний SIGINT обязан восстановить терминал так же, как SIGTERM
+        // (ревью Codex, PR #5).
         prev_term_ = std::signal(SIGTERM, eye_term_on_deadly_signal);
+        prev_int_ = std::signal(SIGINT, eye_term_on_deadly_signal);
 #if !defined(_WIN32)
         prev_hup_ = std::signal(SIGHUP, eye_term_on_deadly_signal);
+        prev_quit_ = std::signal(SIGQUIT, eye_term_on_deadly_signal);
 #endif
         static const bool at_exit_armed = [] {
             std::atexit(restore_terminal);
@@ -140,8 +148,10 @@ public:
     ~TermSession() {
         restore_terminal();
         std::signal(SIGTERM, prev_term_ ? prev_term_ : SIG_DFL);
+        std::signal(SIGINT, prev_int_ ? prev_int_ : SIG_DFL);
 #if !defined(_WIN32)
         std::signal(SIGHUP, prev_hup_ ? prev_hup_ : SIG_DFL);
+        std::signal(SIGQUIT, prev_quit_ ? prev_quit_ : SIG_DFL);
         std::signal(SIGWINCH, prev_winch_ ? prev_winch_ : SIG_DFL);
 #endif
     }
@@ -244,6 +254,7 @@ public:
 private:
     TermSize last_{};
     void (*prev_term_)(int) = nullptr;
+    void (*prev_int_)(int) = nullptr;    // SIGINT есть и на Windows (CRT)
 #if defined(_WIN32)
     HANDLE hin_ = nullptr, hout_ = nullptr;
     bool resized_ = false;
@@ -283,6 +294,7 @@ private:
     }
 #else
     void (*prev_hup_)(int) = nullptr;
+    void (*prev_quit_)(int) = nullptr;   // SIGQUIT — только POSIX
     void (*prev_winch_)(int) = nullptr;
 #endif
 };
