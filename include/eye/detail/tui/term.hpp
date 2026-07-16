@@ -81,8 +81,16 @@ public:
         const HANDLE ho = GetStdHandle(STD_OUTPUT_HANDLE);
         if (ho == INVALID_HANDLE_VALUE || !GetConsoleMode(ho, &mode))
             return false;
-        // Без VT-вывода TUI не позиционирует курсор — честный отказ.
-        return SetConsoleMode(ho, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
+        // Без VT-вывода TUI не позиционирует курсор — честный отказ. ПРОБУЕМ
+        // включить VT и СРАЗУ возвращаем режим как был: этот вызов лишь
+        // ПРОВЕРЯЕТ способность. Иначе TermSession ниже захватил бы уже
+        // изменённый режим и на выходе не восстановил бы VT-бит — терминал
+        // остался бы «подкрашенным» (ревью Codex, PR #5). Настоящее включение
+        // VT сделает TermSession, захватив честный исходный режим.
+        const bool vt_ok =
+            SetConsoleMode(ho, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
+        SetConsoleMode(ho, mode);   // откатить пробу
+        return vt_ok;
 #else
         if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) return false;
         const std::string term = env_value("TERM");

@@ -364,6 +364,31 @@ int main() {
                      "aggregate pointee fields did not expand");
     }
 
+    // ── указатель на ЧЛЕН того же объекта: строит разворачиваемый *p, а не
+    //    ложный цикл на нераскрываемый лист-поле (ревью Codex, PR #5) ─────────
+    {
+        struct Cell { int x = 55; int y = 66; };
+        struct Host {
+            Cell cell;
+            Cell* link = nullptr;   // → cell (член ЭТОГО объекта)
+            EYE_DESCRIBE(Host, cell, link)
+        };
+        Host host;
+        host.link = &host.cell;
+        // enter (корень) → down (cell) → down (link) → enter (follow) →
+        // enter (раскрыть *link) → показать x/y.
+        const std::string out = run_with_script(
+            "enter down down enter enter q",
+            [&](eye::Gallery& g) { g.add(host, "хозяин"); });
+        ok &= expect(out.find("*link") != std::string::npos,
+                     "pointer to in-object member did not build a pointee node");
+        ok &= expect(out.find("цикл") == std::string::npos,
+                     "pointer to in-object member was mis-flagged as a cycle");
+        ok &= expect(out.find("= 55") != std::string::npos &&
+                         out.find("= 66") != std::string::npos,
+                     "in-object-member pointee did not expand into its fields");
+    }
+
     // ═════ M-E: поиск, помощь, EYE_ASCII ═════════════════════════════════════
 
     // ── поиск: / набирает запрос, живой прыжок, n — следующее ───────────────

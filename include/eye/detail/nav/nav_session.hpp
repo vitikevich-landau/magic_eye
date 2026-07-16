@@ -209,9 +209,19 @@ private:
     std::vector<TreeItem*> history_;               // след переходов (⌫)
     std::map<MatKey, TreeItem*> materialized_;     // (адрес, тип) → узел
 
+    // В реестр циклов идут ТОЛЬКО узлы-объекты (корень/pointee/под-объект базы)
+    // — те, к которым осмысленно «вернуться» по указателю. Лист-поле (даже
+    // структурного типа) — не объект: указатель на такое поле обязан строить
+    // разворачиваемый *p, а не ложно ловиться как цикл и прыгать на
+    // нераскрываемый узел поля (ревью Codex, PR #5).
+    static bool is_object_kind(NodeKind k) {
+        return k == NodeKind::root || k == NodeKind::object ||
+               k == NodeKind::base;
+    }
     void register_item(TreeItem* it) {
         const NavNode& n = it->node;
-        if (n.addr == nullptr || n.type.empty()) return;
+        if (n.addr == nullptr || n.type.empty() || !is_object_kind(n.kind))
+            return;
         materialized_.emplace(MatKey{n.addr, n.type}, it);   // первый — хозяин
     }
 
