@@ -241,11 +241,31 @@ int main() {
                      std::string::npos,
                  "stable field number is missing");
     // Инклюзивный диапазон рисуется у МНОГОстрочных регионов (у однострочных он
-    // дублировал бы offset слева и в двухзонном режиме гасится). Третий кусок
-    // heap-строки (.cap/.buf) — 16 Б, 2 строки — диапазон сохраняет.
-    ok &= expect(wide.find("в объекте: +0x0018…+0x0027") !=
-                     std::string::npos,
-                 "inclusive field byte range is missing");
+    // дублировал бы offset слева и в двухзонном режиме гасится). А вот КАКОЙ
+    // регион окажется многострочным — решает STL, поэтому числа не зашиваем:
+    //   • libstdc++ заявляет раскладку строки (str_layout) и бьёт поле на
+    //     .ptr/.len/.cap — многострочен третий кусок: 16 Б от +0x10 внутри поля;
+    //   • прочие STL (MSVC) раскладку не заявляют — строка идёт ОДНИМ куском,
+    //     и многострочно всё поле (32 Б в Release, 40 Б в Debug: /MDd добавляет
+    //     в строку debug-proxy).
+    {
+        // Смещение поля берём живьём: offsetof на не-standard-layout типе
+        // условно-поддерживаем и ловит -Winvalid-offsetof (а со std::string в
+        // MSVC Debug тип именно такой). Модель считает его ровно так же.
+        LongNames probe;
+        const std::size_t text_off = static_cast<std::size_t>(
+            reinterpret_cast<const unsigned char*>(&probe.text) -
+            reinterpret_cast<const unsigned char*>(&probe));
+#if defined(__GLIBCXX__)
+        const std::size_t from = text_off + 16, len = 16;
+#else
+        const std::size_t from = text_off, len = sizeof(std::string);
+#endif
+        const std::string range = "в объекте: +" + eye::detail::hex4(from) +
+                                  "…+" + eye::detail::hex4(from + len - 1);
+        ok &= expect(wide.find(range) != std::string::npos,
+                     "inclusive field byte range is missing");
+    }
     ok &= expect(wide.find("► КУЧА @ ") != std::string::npos &&
                      wide.find("#2 text.ptr ведёт во внешний блок") !=
                          std::string::npos,
