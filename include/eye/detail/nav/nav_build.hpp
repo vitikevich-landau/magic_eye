@@ -99,6 +99,17 @@ inline constexpr bool is_array_smart_ptr_v =
 // его показывает (ревью Codex, PR #5).
 template <class U, bool Complete = is_complete_v<U>>
 struct followable_impl : std::false_type {};
+// В агрегатной ветке — тот же гейт, что у visit_fields: расхождение проб
+// (кроме ложного следа C-массива) значит «structured bindings разберут тип не
+// так, как посчитал field_count». Для КОРНЯ это громкий static_assert с
+// инструкцией (осознанно: пользователь сам дал тип), а вот переход ПО
+// УКАЗАТЕЛЮ в такой агрегат обязан отказать тихо и словами — иначе поле
+// AtomicHolder* роняло бы сборку Gallery::add у ни в чём не виноватого
+// владельца. Гейт constexpr-платформозависим, и это правильно: на Clang/MSVC
+// агрегат с atomic разбирается честно (замерено) — там переход разрешён.
+// Известная дыра: агрегат с АНОНИМНЫМ union для проб невидим (consistent=1,
+// неотличим от обычного) и по-прежнему рвёт сборку — единственный случай,
+// который не ловится до C++26-рефлексии; лечится EYE_DESCRIBE у pointee.
 template <class U>
 struct followable_impl<U, true>
     : std::bool_constant<
@@ -107,7 +118,8 @@ struct followable_impl<U, true>
           own_bases<U> || std::is_same_v<U, std::string> ||
           is_std_vector_v<U> || is_std_array_v<U> ||
           (std::is_class_v<U> && std::is_aggregate_v<U> &&
-           std::is_standard_layout_v<U> && !described<U> && !has_bases<U>)> {};
+           std::is_standard_layout_v<U> && !described<U> && !has_bases<U> &&
+           (brace_probe_consistent_v<U> || has_array_member_v<U>))> {};
 template <class U>
 inline constexpr bool followable_v = followable_impl<U>::value;
 

@@ -2,6 +2,7 @@
 // клавиши исполняются из строки, кадры печатаются в stdout — терминал не нужен.
 #include <eye/magic_eye.hpp>
 
+#include <atomic>    // AtomicHolder — регрессия гейта followable_v
 #include <cstdio>    // std::remove — уборка файла снимка
 #include <cstdlib>
 #include <fstream>
@@ -89,6 +90,16 @@ struct HasArrayPtr {
     std::unique_ptr<int[]> many = std::make_unique<int[]>(4);
     std::shared_ptr<int[]> shared;
     EYE_DESCRIBE(HasArrayPtr, many, shared)
+};
+
+// 7) Указатель на агрегат с atomic-членом: followable_v обязан спросить гейт
+//    проб (как visit_fields) и отказать СЛОВАМИ там, где авторазбор pointee
+//    сломался бы, — а не ронять сборку Gallery::add владельца указателя.
+//    Сам факт компиляции этого типа — главная регрессия (Codex, PR #5).
+struct AtomicHolder { int a = 1; std::atomic<int> f{2}; };
+struct HasAtomicPtr {
+    AtomicHolder* p = nullptr;
+    EYE_DESCRIBE(HasAtomicPtr, p)
 };
 
 // ── ещё три, найденные пыточным заходом по экзотическим типам ──────────────
@@ -670,6 +681,27 @@ int main() {
         ok &= expect(out.find("умный указатель на массив") != std::string::npos,
                      "array smart-pointer follow is not refused with a reason");
     }
+    // Указатель на агрегат с atomic: поведение ключуется САМИМ гейтом проб —
+    // где авторазбор pointee сломался бы (GCC), переход отказывает словами;
+    // где pointee честно разбирается (Clang/MSVC), переход разрешён. Тест
+    // платформонезависим: спрашивает тот же constexpr, что и followable_v.
+    {
+        AtomicHolder target;
+        HasAtomicPtr ap;
+        ap.p = &target;
+        const std::string out = run_with_script(
+            "enter down enter q",
+            [&](eye::Gallery& g) { g.add(ap, "атомный указатель"); });
+        if constexpr (eye::detail::brace_probe_consistent_v<AtomicHolder>) {
+            ok &= expect(out.find("AtomicHolder") != std::string::npos,
+                         "consistent atomic-holder pointee did not follow");
+        } else {
+            ok &= expect(out.find("непрозрачен") != std::string::npos,
+                         "inconsistent atomic-holder follow is not refused "
+                         "with a reason");
+        }
+    }
+
     // Умный указатель на volatile: защита была мёртвой — путь падал до неё.
     {
         HasVolatilePtr vp;
