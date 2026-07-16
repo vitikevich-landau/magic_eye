@@ -47,6 +47,15 @@ struct Beast {
     EYE_DESCRIBE(Beast, fangs)
 };
 
+// База без своего EYE_DESCRIBE: дерево обязано держать её непрозрачной —
+// как родительская карта памяти, без «рассекречивания» авторазбором (Codex).
+struct RawBase { int raw = 22; };
+struct WithRawBase : RawBase {
+    int own = 33;
+    EYE_BASES(WithRawBase, RawBase)
+    EYE_DESCRIBE(WithRawBase, own)
+};
+
 namespace {
 
 void set_env(const char* name, const char* value) {
@@ -418,6 +427,34 @@ int main() {
                      "vptr hex panel is missing");
         ok &= expect(out.find(expected.str()) != std::string::npos,
                      "vptr hex mode does not dump the live object slot");
+    }
+
+    // ── непрозрачная база в дереве не раскрывается авторазбором (Codex) ─────
+    {
+        WithRawBase raw_obj;
+        const std::string out = run_with_script(
+            "enter down enter q",
+            [&](eye::Gallery& g) { g.add(raw_obj, "сырой"); });
+        ok &= expect(out.find("▓ скрыто") != std::string::npos,
+                     "opaque base is not marked hidden in the tree");
+        ok &= expect(out.find("непрозрачная база: нет своего EYE_DESCRIBE") !=
+                         std::string::npos,
+                     "opaque base expansion lacks the honest note");
+        ok &= expect(out.find("= 22") == std::string::npos,
+                     "opaque base leaked its bytes via auto-inspection");
+        ok &= expect(out.find("туман") != std::string::npos,
+                     "opaque base detail panel is missing");
+    }
+
+    // ── пагинация инвалидирует кэш панели деталей (Codex, ABA TreeItem*) ────
+    {
+        // Enter на «⋯ ещё…» ставит курсор на #100 — панель деталей обязана
+        // сразу показать именно #100, а не протухший кэш по старому адресу.
+        const std::string out = run_with_script(
+            "enter end enter end enter q",
+            [&](eye::Gallery& g) { g.add(nums, "числа"); });
+        ok &= expect(out.find("╡ #100 ╞") != std::string::npos,
+                     "detail panel is stale after paging (TreeItem* ABA)");
     }
 
     // ── снимок экрана: s пишет кадр в файл чистым текстом ───────────────────

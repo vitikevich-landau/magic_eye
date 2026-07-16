@@ -486,6 +486,13 @@ inline void act_follow(App& a) {
 
 inline void act_expand(App& a) {
     const NavSession::Act act = a.nav.expand_current();
+    if (act == NavSession::Act::paged) {
+        // Пагинация УНИЧТОЖИЛА узел «⋯ ещё…», а кэш деталей ключуется сырым
+        // TreeItem*: новый элемент может лечь на тот же адрес (ABA) — кэш
+        // показал бы протухшую панель. Сбрасываем явно (ревью Codex, PR #5).
+        a.detail_item = nullptr;
+        return;
+    }
     if (act == NavSession::Act::leaf) {
         TreeItem* it = a.nav.current();
         if (it != nullptr &&

@@ -372,6 +372,47 @@ NavNode make_typed_field_node(std::string name, const FT& field,
     return n;
 }
 
+// Узел НЕпрозрачной базы (нет своего EYE_DESCRIBE/EYE_BASES): байты честно
+// скрыты — как «непрозрачная база» на карте родителя. Никакого авторазбора:
+// дерево обязано говорить то же, что панель памяти (ревью Codex, PR #5).
+template <class B>
+NavNode make_opaque_base_node(const B& b) {
+    NavNode n;
+    n.kind = NodeKind::base;
+    n.title = "база " + type_name<B>();
+    n.type = type_name<B>();
+    n.preview = "▓ скрыто";
+    n.addr = std::addressof(b);
+    n.size = sizeof(B);
+    const B* pb = std::addressof(b);
+    n.can_expand = true;
+    n.expand = [pb]() {
+        std::vector<NavNode> kids;
+        kids.push_back(make_note_node(
+            "непрозрачная база: нет своего EYE_DESCRIBE"));
+        kids.push_back(make_note_node(
+            "байты честно скрыты — добавь EYE_DESCRIBE, Око увидит"));
+        if constexpr (std::is_polymorphic_v<B>)
+            kids.push_back(make_vptr_node(
+                read_vtable_site(*pb, 0, type_name<B>()), pb, sizeof(B)));
+        return kids;
+    };
+    n.detail = [pb](DetailMode m) {
+        if (m == DetailMode::hex) {
+            render_hex_panel("база " + type_name<B>(), pb, sizeof(B));
+            return;
+        }
+        frame_top("база " + type_name<B>() + " · туман");
+        frame_sep("паспорт");
+        render_passport(passport_of<B>());
+        put_text("поля скрыты: у базы нет своего EYE_DESCRIBE");
+        put_text("байты не выдаём за padding и не разбираем наугад");
+        put_text("добавь EYE_DESCRIBE в " + type_name<B>() + " — Око увидит");
+        frame_bottom();
+    };
+    return n;
+}
+
 // Дети объекта со СВОИМ реестром: базы (рекурсивно объектные узлы) + свои
 // поля + vptr-сайты (все, с владельцами) + скрытые диапазоны.
 template <class T>
@@ -380,7 +421,11 @@ std::vector<NavNode> make_registry_children(const T& obj) {
     std::vector<NavNode> kids;
     const auto* base = reinterpret_cast<const unsigned char*>(std::addressof(obj));
 
-    // 1) под-объекты баз — каждый раскрывается как самостоятельный объект.
+    // 1) под-объекты баз. База со СВОИМ реестром раскрывается как
+    //    самостоятельный объект; база БЕЗ реестра остаётся непрозрачной —
+    //    ровно как на родительской карте памяти (модель пометила её байты
+    //    скрытыми, и дерево не имеет права «рассекретить» их авторазбором,
+    //    перезапустив диспетчер одиночного объекта).
     if constexpr (own_bases<T>) {
         std::apply(
             [&](auto... tag) {
@@ -391,10 +436,17 @@ std::vector<NavNode> make_registry_children(const T& obj) {
                         reinterpret_cast<const unsigned char*>(
                             std::addressof(b)) -
                         base);
-                    NavNode bn = make_object_node<B>(
-                        b, "база " + type_name<B>(), NodeKind::base);
+                    NavNode bn;
+                    if constexpr (own_described<B> || own_bases<B>) {
+                        bn = make_object_node<B>(
+                            b, "база " + type_name<B>(), NodeKind::base);
+                    } else {
+                        bn = make_opaque_base_node<B>(b);
+                    }
                     bn.suffix = "+" + hex4(off);
-                    if (is_virtual_base_v<T, B>) bn.preview = "[virtual]";
+                    if (is_virtual_base_v<T, B>)
+                        bn.preview += bn.preview.empty() ? "[virtual]"
+                                                         : " [virtual]";
                     kids.push_back(std::move(bn));
                 }(tag));
             },
