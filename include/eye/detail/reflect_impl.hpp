@@ -366,7 +366,11 @@ VtableSite read_vtable_site(const T& obj, std::size_t offset,
     s.offset = offset;
     s.owner  = owner;
     void* vptr = nullptr;
-    std::memcpy(&vptr, std::addressof(obj), sizeof(vptr));  // начало под-объекта = vptr
+    // Каст в void* — сознательный сигнал Clang'у (-Wdynamic-class-memaccess):
+    // обычно memcpy из полиморфного объекта — баг, здесь же чтение vptr байтами
+    // и есть работа Ока. Начало под-объекта = vptr.
+    std::memcpy(&vptr, static_cast<const void*>(std::addressof(obj)),
+                sizeof(vptr));
     s.vptr = vptr;
     s.dyn_type = type_name_of(typeid(obj));  // динамический тип (RTTI, самый производный)
 #if EYE_ITANIUM_ABI

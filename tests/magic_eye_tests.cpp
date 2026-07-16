@@ -22,10 +22,14 @@ static_assert(eye::detail::brace_probe_consistent_v<NestedAgg>,
               "детектор ложно сработал на вложенном агрегате");
 static_assert(eye::detail::brace_probe_consistent_v<StrAgg>,
               "детектор ложно сработал на агрегате со std::string");
-// std::atomic ломает подсчёт полей ТОЛЬКО на libstdc++: там {any}-копия в
-// счётчике недопустима. У MSVC atomic терпит её, field_count(A)=2 верно, и
-// агрегат разбирается сам — детектору срабатывать не на чем (замерено).
-#if defined(__GLIBCXX__)
+// std::atomic ломает подсчёт полей ТОЛЬКО у GCC: его overload resolution
+// отвергает {any}-копию atomic в счётчике. Гейт по __GLIBCXX__ мало: Clang
+// тоже сидит на libstdc++ (__GLIBCXX__ определён), но пробу разрешает иначе —
+// детектор молчит, и это ПРАВИЛЬНО: замерено на Clang 17, field_count даёт 2 и
+// агрегат с atomic честно разбирается автоматикой, как на MSVC (там тоже
+// замерено). Негативный assert — проверка GCC-специфичного поведения
+// (ревью Codex, PR #5).
+#if defined(__GLIBCXX__) && defined(__GNUC__) && !defined(__clang__)
 struct AtomicAgg { int a; std::atomic<int> f; };
 static_assert(!eye::detail::brace_probe_consistent_v<AtomicAgg>,
               "детектор НЕ поймал std::atomic — EYE_DESCRIBE-подсказка молчит");
@@ -93,7 +97,7 @@ struct WithRawBase : RawBase {
 
 // --- НЕагрегатная (private + ctor) непрозрачная база — байты скрыты, не padding
 class PrivBase {
-    int hidden = 1;
+    [[maybe_unused]] int hidden = 1;   // нарочно не читается: тест «байты скрыты»
 public:
     PrivBase() = default;
 };

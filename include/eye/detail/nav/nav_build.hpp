@@ -464,6 +464,7 @@ NavNode make_opaque_base_node(const B& b) {
     const B* pb = std::addressof(b);
     n.can_expand = true;
     n.expand = [pb]() {
+        (void)pb;   // нужен лишь в if constexpr-ветке — Clang иначе ворчит
         std::vector<NavNode> kids;
         kids.push_back(make_note_node(
             "непрозрачная база: нет своего EYE_DESCRIBE"));
