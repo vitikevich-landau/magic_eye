@@ -1,11 +1,36 @@
 #include <eye/magic_eye.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <vector>
+
+// --- детектор «член ломает подсчёт полей» (brace_probe_consistent_v) ---------
+// Compile-time регрессия: если правка field_count собьёт детектор, EYE_DESCRIBE-
+// подсказка на std::atomic перестанет срабатывать (или начнёт врать на хороших
+// агрегатах). Проверяем оба конца.
+namespace probe_ns {
+struct PlainAgg  { int x; int y; };                 // хороший — детектор молчит
+struct NestedAgg { int a; PlainAgg p; };            // вложенный — тоже молчит
+struct StrAgg    { int a; std::string s; };         // std::string — не ломает счёт
+static_assert(eye::detail::brace_probe_consistent_v<PlainAgg>,
+              "детектор ложно сработал на простом агрегате");
+static_assert(eye::detail::brace_probe_consistent_v<NestedAgg>,
+              "детектор ложно сработал на вложенном агрегате");
+static_assert(eye::detail::brace_probe_consistent_v<StrAgg>,
+              "детектор ложно сработал на агрегате со std::string");
+// std::atomic ломает подсчёт полей ТОЛЬКО на libstdc++: там {any}-копия в
+// счётчике недопустима. У MSVC atomic терпит её, field_count(A)=2 верно, и
+// агрегат разбирается сам — детектору срабатывать не на чем (замерено).
+#if defined(__GLIBCXX__)
+struct AtomicAgg { int a; std::atomic<int> f; };
+static_assert(!eye::detail::brace_probe_consistent_v<AtomicAgg>,
+              "детектор НЕ поймал std::atomic — EYE_DESCRIBE-подсказка молчит");
+#endif
+}  // namespace probe_ns
 
 // Наследование проверяем на типах в ГЛОБАЛЬНОЙ области — тогда имена типов
 // коротки ("BaseA", а не "(anonymous namespace)::BaseA") и метки совпадают.

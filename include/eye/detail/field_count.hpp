@@ -30,10 +30,51 @@ constexpr std::size_t field_count() {
         return field_count<T, N + 1>();
 }
 
+// Тот же счётчик, но пробник БЕЗ внутренних скобок: T{ any, ... } вместо
+// T{ {any}, ... }. Нужен ТОЛЬКО как детектор (для разбора берётся обычный
+// field_count). У «нормальных» агрегатов оба счётчика дают одно число. А член,
+// который не терпит копирующую list-инициализацию из {any} — std::atomic,
+// std::mutex и прочие некопируемые, — заваливает пробник СО скобками раньше
+// времени, и field_count недосчитывается. Расхождение = «этот тип structured
+// bindings не разберут так, как посчитал field_count».
+template <class T, std::size_t... Is>
+constexpr bool flat_constructible(std::index_sequence<Is...>) {
+    return requires { T{ (static_cast<void>(Is), any_init{})... }; };
+}
+template <class T, std::size_t N = 0>
+constexpr std::size_t flat_field_count() {
+    static_assert(N <= sizeof(T) + 1, "flat_field_count: разбег");
+    if constexpr (flat_constructible<T>(std::make_index_sequence<N>{})
+              && !flat_constructible<T>(std::make_index_sequence<N + 1>{}))
+        return N;
+    else
+        return flat_field_count<T, N + 1>();
+}
+template <class T>
+inline constexpr bool brace_probe_consistent_v =
+    field_count<T>() == flat_field_count<T>();
+
 // Обход полей через structured bindings (M2). Лимит — 8, поднимается
 // дописыванием веток (рефлексии нет — число имён пишем руками).
 template <class T, class F>
 void visit_fields(const T& obj, F&& f) {
+    // Ранняя ВНЯТНАЯ диагностика вместо простыни из шаблонов. Ловит агрегаты с
+    // членом, который автоматика не разберёт: std::atomic, std::mutex и прочие
+    // некопируемые ломают подсчёт полей (field_count недосчитывается — см.
+    // brace_probe_consistent_v). Лечится одной строкой EYE_DESCRIBE. Иначе тип
+    // молча ушёл бы в кривой structured binding и упал бы глубоко внутри.
+    static_assert(brace_probe_consistent_v<T>,
+        "ОКО МАГА: этот агрегат нельзя разобрать автоматически — в нём есть "
+        "член, ломающий подсчёт полей (обычно std::atomic / std::mutex или "
+        "иной некопируемый тип). РЕШЕНИЕ: добавь в тип макрос "
+        "EYE_DESCRIBE(ИмяТипа, поле1, поле2, ...) — Око возьмёт поля из реестра, "
+        "минуя structured bindings, и покажет их с именами (в т.ч. private). "
+        "Если тип чужой и править нельзя — оберни его в свой struct с "
+        "EYE_DESCRIBE, либо смотри по указателю только адрес.");
+    // Если сборка упала на одной из строк-раскладок НИЖЕ с «cannot decompose
+    // class type … anonymous union member» — у типа анонимный union, и это
+    // единственный случай, который не отличить трейтами (он неотличим от
+    // обычного агрегата). Лечится тем же EYE_DESCRIBE(ИмяТипа, поля...).
     constexpr std::size_t N = field_count<T>();
     if constexpr (N == 0) { (void)obj; (void)f;
     } else if constexpr (N == 1) { const auto& [a] = obj; f(a);
