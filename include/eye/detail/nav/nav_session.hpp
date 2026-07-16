@@ -272,19 +272,35 @@ private:
         if (at == parent->kids.size()) return Act::none;
         parent->kids.erase(parent->kids.begin() +
                            static_cast<std::ptrdiff_t>(at));
+        TreeItem* first = nullptr;          // первый узел новой страницы
         for (NavNode& n : next) {
             auto item = std::make_unique<TreeItem>();
             item->node = std::move(n);
             item->parent = parent;
             item->depth = parent->depth + 1;
             register_item(item.get());
+            if (first == nullptr) first = item.get();
             parent->kids.insert(
                 parent->kids.begin() + static_cast<std::ptrdiff_t>(at++),
                 std::move(item));
         }
-        flatten();
-        if (cursor_ >= visible_.size())
-            cursor_ = visible_.empty() ? 0 : visible_.size() - 1;
+        // Узел «⋯ ещё» УНИЧТОЖЕН строкой erase выше, и его адрес стал висячим.
+        // flatten() же удерживает курсор, СРАВНИВАЯ указатель visible_[cursor_]
+        // с узлами нового списка, — а аллокатор охотно отдаёт освобождённый блок
+        // одному из только что созданных узлов (ABA). Тогда курсор прыгает на
+        // случайный элемент: на MSVC ловилось #103 вместо #100, на gcc адрес не
+        // совпадал и «спасал» индекс, случайно указывавший на #100, — то есть
+        // тест там проходил по везению. Гасим visible_, чтобы keep вышел
+        // nullptr, и ставим курсор ЯВНО на первый элемент страницы — это и есть
+        // обещанное поведение Enter на «⋯ ещё» (ревью Codex, PR #5).
+        visible_.clear();
+        if (first != nullptr) {
+            set_cursor_to(first);
+        } else {
+            flatten();
+            if (cursor_ >= visible_.size())
+                cursor_ = visible_.empty() ? 0 : visible_.size() - 1;
+        }
         return Act::paged;
     }
 
