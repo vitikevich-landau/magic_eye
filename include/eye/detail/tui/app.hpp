@@ -45,6 +45,7 @@ inline const char* gl(const char* unicode, const char* fallback) {
 inline const char* gl_open()   { return gl("▾ ", "v "); }   // узел раскрыт
 inline const char* gl_closed() { return gl("▸ ", "> "); }   // узел свёрнут
 inline const char* gl_cursor() { return gl("►", ">"); }     // курсорная строка
+inline const char* gl_cursor_off() { return gl("▹", "·"); } // курсор «припаркован» (фокус ушёл в детали)
 inline const char* gl_spine()  { return gl("║", "|"); }     // граница зон
 inline const char* gl_mark()   { return gl("◈", "*"); }     // маркер шапки/тоста
 
@@ -164,13 +165,16 @@ inline std::string tree_row_plain(const TreeItem* it) {
 }
 
 inline StyledLine tree_row_line(const TreeItem* it, bool cursor,
-                                std::size_t width) {
+                                std::size_t width, bool active = true) {
     const NavNode& n = it->node;
     if (cursor) {
         // Курсорная строка — инверсия целиком; внутри без цветов, чтобы
         // вложенные reset'ы не разрывали фон. Стрелка ► дублирует курсор
-        // там, где цветов нет (EYE_COLOR=0, снапшот-тесты).
-        std::string plain = gl_cursor() + tree_row_plain(it);
+        // там, где цветов нет (EYE_COLOR=0, снапшот-тесты). Когда фокус ушёл
+        // в детали (Tab), дерево «припарковано»: стрелка полая ▹ и инверсия
+        // тусклее (SGR 2) — так видно, куда идут ↑↓/PgUp даже без цвета.
+        std::string plain =
+            (active ? gl_cursor() : gl_cursor_off()) + tree_row_plain(it);
         const std::size_t sw = vwidth(n.suffix);
         std::size_t pw = vwidth(plain);
         if (pw + sw + 1 > width) {                 // не влезает — режем текст
@@ -182,8 +186,9 @@ inline StyledLine tree_row_line(const TreeItem* it, bool cursor,
             s += std::string(width - pw - sw, ' ') + n.suffix;
         else if (pw < width)
             s += std::string(width - pw, ' ');
-        return {std::string(clr::code("\x1b[7m")) + s + clr::reset(),
-                std::max(width, vwidth(s))};
+        std::string sgr = clr::code("\x1b[7m");
+        if (!active) sgr = std::string(clr::code("\x1b[2m")) + sgr;
+        return {sgr + s + clr::reset(), std::max(width, vwidth(s))};
     }
     Line l;
     l.sp(1 + it->depth * 2);          // 1 колонка — место курсорной стрелки ►
@@ -427,19 +432,23 @@ inline void draw(App& a, Canvas& canvas, const Layout& l) {
             if (idx >= rows.size()) break;
             const bool cur = idx == a.nav.cursor();
             canvas.blit(l.body_y + i, l.tree_x,
-                        tree_row_line(rows[idx], cur, l.tree_w),
+                        tree_row_line(rows[idx], cur, l.tree_w,
+                                      !a.focus_detail),
                         l.tree_w);
         }
     }
 
-    // Спайн между зонами.
-    if (l.wide)
+    // Спайн между зонами: подсвечен золотом со стороны активной зоны (фокус в
+    // деталях) — глаз сразу видит, какая зона ловит ↑↓/PgUp.
+    if (l.wide) {
+        const char* spine_clr = a.focus_detail ? clr::gold() : clr::grey();
         for (std::size_t i = 0; i < l.body_h; ++i)
             canvas.blit(l.body_y + i, l.tree_w,
-                        StyledLine{std::string(clr::grey()) + gl_spine() +
+                        StyledLine{std::string(spine_clr) + gl_spine() +
                                        clr::reset(),
                                    1},
                         1);
+    }
 
     // Детали выбранного узла.
     if (show_detail) {
