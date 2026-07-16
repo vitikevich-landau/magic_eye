@@ -427,6 +427,11 @@ inline void draw_help(App& a, Canvas& canvas, const Layout& l) {
 
 // ─── отрисовка кадра ─────────────────────────────────────────────────────────
 inline void draw(App& a, Canvas& canvas, const Layout& l) {
+    // Фокус деталей существует ТОЛЬКО в широкой раскладке. При сужении
+    // терминала зона деталей исчезает, а застрявший focus_detail угонял бы
+    // ↑↓/PgUp в невидимую панель (дерево «зависает») и рисовал курсор
+    // припаркованным ▹, будто фокус где-то ещё (Codex, PR #5).
+    if (!l.wide) a.focus_detail = false;
     if (a.help) {
         draw_help(a, canvas, l);
         return;
@@ -593,6 +598,10 @@ inline void act_back(App& a) {
 }
 
 inline void dispatch(App& a, const KeyEvent& e, const Layout& l) {
+    // См. draw: в узкой раскладке фокуса деталей нет. Здесь нормализуем
+    // отдельно, потому что run_live зовёт dispatch со СВЕЖЕЙ раскладкой на
+    // каждое событие — resize мог случиться после последней отрисовки.
+    if (!l.wide) a.focus_detail = false;
     a.toast.clear();
 
     // Экран помощи: любая клавиша закрывает.
