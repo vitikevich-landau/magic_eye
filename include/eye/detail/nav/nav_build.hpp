@@ -534,9 +534,11 @@ std::vector<NavNode> make_registry_children(const T& obj) {
                         bn = make_opaque_base_node<B>(b);
                     }
                     bn.suffix = "+" + hex4(off);
-                    if (is_virtual_base_v<T, B>)
+                    if (is_virtual_base_v<T, B>) {
+                        bn.virtual_base = true;   // дедуп «общий» — только им
                         bn.preview += bn.preview.empty() ? "[virtual]"
                                                          : " [virtual]";
+                    }
                     kids.push_back(std::move(bn));
                 }(tag));
             },

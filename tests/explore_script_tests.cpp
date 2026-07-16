@@ -727,6 +727,24 @@ int main() {
                      "fancy-pointer / empty-array roots are missing from the tree");
     }
 
+    // ── primary-база НЕ гасится ложным «общий», когда тот же под-объект
+    //    добавлен ОТДЕЛЬНЫМ корнем: g.add(derived) + g.add(base_ref) давали
+    //    совпадение ключа (адрес, тип) с чужим корнем, и невиртуальная база
+    //    помечалась «общий (virtual)» без раскрытия (Codex, PR #5) ──────────
+    {
+        Knight twin;
+        const std::string out = run_with_script(
+            "enter down enter q",
+            [&](eye::Gallery& g) {
+                g.add(twin, "рыцарь-дубль");
+                g.add(static_cast<Unit&>(twin), "он же через Unit&");
+            });
+        ok &= expect(out.find("общий") == std::string::npos,
+                     "primary base falsely marked shared across roots");
+        ok &= expect(out.find("hp") != std::string::npos,
+                     "primary base fields hidden by cross-root dedup");
+    }
+
     // ── пагинация инвалидирует кэш панели деталей (Codex, ABA TreeItem*) ────
     {
         // Enter на «⋯ ещё…» ставит курсор на #100 — панель деталей обязана

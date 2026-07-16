@@ -249,8 +249,13 @@ private:
         // обе ветки ведут к одному Being). Не плодим второй разворачиваемый
         // узел — метим общим и не разворачиваем; Enter прыгнет к оригиналу.
         // Так дерево совпадает с картой памяти, где второй помечен «общий».
-        // (Повторная НЕвиртуальная база — РАЗНЫЕ адреса, ключ не совпадёт.)
-        if (item->node.kind == NodeKind::base && owner != item.get()) {
+        // Метим ТОЛЬКО virtual-базы (флаг узла): внутри одного дерева повторная
+        // НЕвиртуальная база и правда лежит по другому адресу, но её ключ
+        // (адрес, тип) может совпасть с ЧУЖИМ КОРНЕМ — g.add(derived) плюс
+        // g.add(static_cast<Base&>(derived)) давали primary-базе ложное «общий
+        // (virtual)» и гасили её раскрытие (ревью Codex, PR #5).
+        if (item->node.kind == NodeKind::base && item->node.virtual_base &&
+            owner != item.get()) {
             item->shared_of = owner;
             item->node.can_expand = false;
             item->node.expand = nullptr;

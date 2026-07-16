@@ -46,6 +46,11 @@ struct NavNode {
     bool can_expand = false;
     std::function<std::vector<NavNode>()> expand;
 
+    // Узел — под-объект VIRTUAL-базы. Только такие дедупятся пометкой «общий»:
+    // у обычной primary-базы ключ (адрес, тип) может совпасть с ЧУЖИМ корнем
+    // (g.add(derived).add(base_ref)), и без флага её ложно гасили бы (Codex).
+    bool virtual_base = false;
+
     // --- панель деталей: рисует секции узла в АКТИВНЫЙ Surface ----------------
     std::function<void(DetailMode)> detail;
     bool has_vtable = false;   // режим [v] осмыслен (полиморфный узел)
