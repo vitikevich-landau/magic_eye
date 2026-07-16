@@ -576,6 +576,21 @@ int main() {
                      "opaque base detail panel is missing");
     }
 
+    // ── скалярный корень — ЛИСТ: детей у не-класса нет по построению, поэтому
+    //    в узком режиме детали обязаны открыться с ПЕРВОГО Enter. Раньше корень
+    //    носил стрелку ▸, и первый Enter тратился на выяснение пустоты — детали
+    //    показывались лишь со второго (ревью Codex, PR #5).
+    {
+        set_env("EYE_WIDTH", "80");
+        int lonely = 7;
+        const std::string out = run_with_script(
+            "enter q",
+            [&](eye::Gallery& g) { g.add(lonely, "одинокое число"); });
+        ok &= expect(out.find("паспорт") != std::string::npos,
+                     "narrow mode: scalar root needs a second Enter for details");
+        set_env("EYE_WIDTH", "126");
+    }
+
     // ── nav не имеет права ЛОМАТЬ СБОРКУ там, где inspect работает ──────────
     //    Три находки Codex (PR #5): поле-указатель на функцию, PIMPL-указатель
     //    и умный указатель на массив роняли КОМПИЛЯЦИЮ Gallery::add. Главная

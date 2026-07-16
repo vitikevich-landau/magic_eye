@@ -709,8 +709,12 @@ NavNode make_object_node(const T& obj, std::string label, NodeKind kind) {
         n.preview = "= " + clip(f.value, 16);
         // Корень/pointee сам является указателем — с него можно идти дальше.
         arm_follow(n, obj, n.title);
-        n.can_expand = true;
-        n.expand = [p]() { return make_children<T>(*p); };
+        // can_expand НЕ ставим: детей у не-класса нет по построению
+        // (make_children<T> для скаляра/enum/указателя возвращает пусто, вся
+        // правда — в панели деталей). Стрелка ▸ обещала бы несуществующих
+        // детей, а в узком режиме первый Enter тратился бы на выяснение, что их
+        // нет: ветка «открыть детали» требует !can_expand, и детали
+        // открывались бы лишь со ВТОРОГО Enter (ревью Codex, PR #5).
     } else if constexpr (is_smart_ptr_v<T> || is_array_smart_ptr_v<T>) {
         // Умный указатель как КОРЕНЬ галереи (Gallery.add(ptr)) ведёт себя как
         // поле-умный-указатель: followable через .get() (g/Enter → *ptr),
