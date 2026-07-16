@@ -273,6 +273,22 @@ inline void pop_utf8(std::string& s) {
 // друг друга (проба-потом-создание страдала TOCTOU), а занятое или
 // недоступное имя (EACCES от чужого файла) просто пропускается к следующему
 // номеру, не застревая на нём.
+//
+// Эксклюзивное создание одним вызовом (не усекать существующий). std::fopen на
+// MSVC помечен C4996 (советуют fopen_s), но семантика "wbx" именно та, что
+// нужна, а _CRT_SECURE_NO_WARNINGS из заголовка не выставить — глушим
+// предупреждение точечно прагмой, единый кодовый путь для всех компиляторов.
+inline std::FILE* create_new_file(const char* path) {
+#if defined(_MSC_VER)
+#  pragma warning(push)
+#  pragma warning(disable : 4996)
+#endif
+    return std::fopen(path, "wbx");
+#if defined(_MSC_VER)
+#  pragma warning(pop)
+#endif
+}
+
 inline std::string dump_screen(const Canvas& canvas) {
     std::string dir = env_value("EYE_SNAP_DIR");
     if (dir.empty()) dir = ".";
@@ -282,7 +298,7 @@ inline std::string dump_screen(const Canvas& canvas) {
         char name[32];
         std::snprintf(name, sizeof(name), "eye_snap_%03d.txt", n);
         path = dir + "/" + name;
-        out = std::fopen(path.c_str(), "wbx");   // только СОЗДАТЬ, не усекать
+        out = create_new_file(path.c_str());   // только СОЗДАТЬ, не усекать
     }
     if (out == nullptr) return "";
     for (const std::string& row : canvas.rows()) {

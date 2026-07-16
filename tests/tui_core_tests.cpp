@@ -12,6 +12,15 @@ namespace tui = eye::detail::tui;
 
 namespace {
 
+// setenv — POSIX; на MSVC его нет, там _putenv_s (как в прочих тестах).
+void set_env(const char* name, const char* value) {
+#if defined(_WIN32)
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
 bool expect(bool condition, const char* message) {
     if (!condition) std::cerr << "FAIL: " << message << '\n';
     return condition;
@@ -41,7 +50,7 @@ bool keys_equal(const std::vector<tui::KeyEvent>& got,
 int main() {
     // TUI живёт с включёнными цветами (клип обязан закрывать их reset'ом) —
     // форсируем, чтобы тест не зависел от isatty среды запуска.
-    setenv("EYE_COLOR", "1", 1);
+    set_env("EYE_COLOR", "1");
     bool ok = true;
 
     // ── декодер: базовые клавиши ────────────────────────────────────────────
