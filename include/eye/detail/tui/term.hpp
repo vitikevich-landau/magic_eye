@@ -8,6 +8,7 @@
 //   POSIX: termios + poll + ioctl. Windows: ReadConsoleInputW переводится в те
 //   же VT-байты, что шлёт POSIX-терминал, — декодер клавиш один на обе ОС.
 #pragma once
+#include <cerrno>    // EINTR — повтор записи, прерванной сигналом (POSIX)
 #include <cstddef>
 #include <cstdlib>
 #include <string>
@@ -183,7 +184,16 @@ public:
         while (done < s.size()) {
             const ssize_t n = ::write(STDOUT_FILENO, s.data() + done,
                                       s.size() - done);
-            if (n <= 0) return;
+            if (n < 0) {
+                // EINTR — запись прервал сигнал (наш же SIGWINCH при resize).
+                // Бросить хвост кадра нельзя: канва уже продвинула дифф, и
+                // недописанные байты никто не перерисует — экран остался бы
+                // порванным. Повторяем. Рассчитывать на SA_RESTART нельзя:
+                // std::signal ставит его не на всех платформах (Codex, PR #5).
+                if (errno == EINTR) continue;
+                return;             // настоящая ошибка (EIO/EPIPE) — сдаёмся
+            }
+            if (n == 0) return;
             done += static_cast<std::size_t>(n);
         }
 #endif
