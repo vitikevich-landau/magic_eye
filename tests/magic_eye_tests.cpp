@@ -22,6 +22,25 @@ static_assert(eye::detail::brace_probe_consistent_v<NestedAgg>,
               "детектор ложно сработал на вложенном агрегате");
 static_assert(eye::detail::brace_probe_consistent_v<StrAgg>,
               "детектор ложно сработал на агрегате со std::string");
+// C-массив создаёт расхождение счётчиков ЛОЖНО (elision в flat-пробе), и
+// детектор обязан его пропускать: field_count для массива верен, structured
+// bindings отдают его одной привязкой, разбор работает (Codex, PR #5).
+// Ассертим только то, на что опираемся: сам ГЕЙТ visit_fields и распознавание
+// массива — а не случайные значения счётчиков (урок Clang/atomic).
+struct ArrAgg { char tag[4]; };
+struct ArrMix { int n; char tag[4]; };
+static_assert(eye::detail::brace_probe_consistent_v<ArrAgg> ||
+                  eye::detail::has_array_member_v<ArrAgg>,
+              "агрегат с C-массивом не проходит гейт — inspect не соберётся");
+static_assert(eye::detail::has_array_member_v<ArrMix>,
+              "C-массив не первым полем не распознан");
+// НЕ ассертим has_array_member_v для StrAgg/NestedAgg: у них он честно true
+// (string принимает {any,any} через ctor(const char*, size_t), вложенный
+// агрегат с ≥2 полями — через агрегатную инициализацию), но они consistent —
+// гейт их и не спрашивает. Несущая проверка одна: чистый скалярный агрегат.
+static_assert(!eye::detail::has_array_member_v<PlainAgg>,
+              "детектор массивов ложно сработал на скалярном агрегате");
+
 // std::atomic ломает подсчёт полей ТОЛЬКО у GCC: его overload resolution
 // отвергает {any}-копию atomic в счётчике. Гейт по __GLIBCXX__ мало: Clang
 // тоже сидит на libstdc++ (__GLIBCXX__ определён), но пробу разрешает иначе —
@@ -33,6 +52,8 @@ static_assert(eye::detail::brace_probe_consistent_v<StrAgg>,
 struct AtomicAgg { int a; std::atomic<int> f; };
 static_assert(!eye::detail::brace_probe_consistent_v<AtomicAgg>,
               "детектор НЕ поймал std::atomic — EYE_DESCRIBE-подсказка молчит");
+static_assert(!eye::detail::has_array_member_v<AtomicAgg>,
+              "atomic принят за массив — гейт пропустит его к криптоошибке");
 #endif
 }  // namespace probe_ns
 
@@ -517,6 +538,13 @@ int main() {
     const std::string bo_out = render_obj(bases_only, 126, "basesonly");
     ok &= expect(bo_out.find("добавь EYE_DESCRIBE") != std::string::npos,
                  "inherited-eye_bases-only type not treated as opaque");
+
+    // --- регресс (Codex): агрегат с C-массивом разбирается автоматикой, а не
+    //     отвергается atomic-детектором (расхождение счётчиков там ложное) ----
+    probe_ns::ArrMix arr_mix{7, {'a', 'b', 'c', '\0'}};
+    const std::string arr_out = render_obj(arr_mix, 126, "arrmix");
+    ok &= expect(arr_out.find("полей 2") != std::string::npos,
+                 "aggregate with a C-array member is not auto-decomposed");
 
     // --- регресс (Codex): scoped enum рендерится через underlying, не «—» ------
     ok &= expect(eye::detail::stringify(Color::Blue) == "4",

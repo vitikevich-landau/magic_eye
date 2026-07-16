@@ -54,6 +54,33 @@ template <class T>
 inline constexpr bool brace_probe_consistent_v =
     field_count<T>() == flat_field_count<T>();
 
+// Ложный след расхождения: C-МАССИВ. any_init конвертируется во что угодно,
+// КРОМЕ массива (conversion operator в массивный тип невыводим), поэтому brace
+// elision в flat-пробнике срабатывает только на массивах: char tag[4] честно
+// съедает четыре плоских any (flat=4), хотя field_count=1 ВЕРЕН — structured
+// bindings отдают массив одной привязкой. Такой агрегат разбирается штатно, и
+// детектору тут молчать (ревью Codex, PR #5).
+//
+// Отличаем массив от atomic-подобного члена пробой «слот принимает {any,any}»:
+// массив из ≥2 элементов принимает двухэлементный braced-список, скаляр и
+// atomic — нет. (Массив из 1 элемента не принимает — но он и flat-пробу не
+// раздувает: расхождения нет.) Вложенный агрегат с ≥2 полями тоже принимает,
+// но он расхождения не создаёт (any_init конвертируется в него напрямую, без
+// elision), поэтому на детектор не влияет. Редкая комбинация «массив И atomic
+// в одном агрегате» остаётся на совести криптоошибки — не врём, просто без
+// красивой подсказки.
+template <class T, std::size_t... Before>
+constexpr bool wide_slot_after(std::index_sequence<Before...>) {
+    return requires { T{ { any_slot<Before>{} }..., { any_init{}, any_init{} } }; };
+}
+template <class T, std::size_t... Pos>
+constexpr bool any_wide_slot(std::index_sequence<Pos...>) {
+    return (... || wide_slot_after<T>(std::make_index_sequence<Pos>{}));
+}
+template <class T>
+inline constexpr bool has_array_member_v =
+    any_wide_slot<T>(std::make_index_sequence<field_count<T>()>{});
+
 // Обход полей через structured bindings (M2). Лимит — 8, поднимается
 // дописыванием веток (рефлексии нет — число имён пишем руками).
 template <class T, class F>
@@ -63,7 +90,9 @@ void visit_fields(const T& obj, F&& f) {
     // некопируемые ломают подсчёт полей (field_count недосчитывается — см.
     // brace_probe_consistent_v). Лечится одной строкой EYE_DESCRIBE. Иначе тип
     // молча ушёл бы в кривой structured binding и упал бы глубоко внутри.
-    static_assert(brace_probe_consistent_v<T>,
+    // C-массив расхождение создаёт ЛОЖНО (см. has_array_member_v) — его
+    // пропускаем: field_count для него верен и разбор работает.
+    static_assert(brace_probe_consistent_v<T> || has_array_member_v<T>,
         "ОКО МАГА: этот агрегат нельзя разобрать автоматически — в нём есть "
         "член, ломающий подсчёт полей (обычно std::atomic / std::mutex или "
         "иной некопируемый тип). РЕШЕНИЕ: добавь в тип макрос "
