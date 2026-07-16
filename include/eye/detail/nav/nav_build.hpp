@@ -155,11 +155,20 @@ void arm_follow(NavNode& n, const FT& field, const std::string& via) {
         n.follow_block = "умный указатель на массив: длина неизвестна";
     } else if constexpr (is_smart_ptr_v<U0>) {
         using V = typename smart_pointee<U0>::type;
-        const V* p = field.get();
+        const V* p = field.get();          // приведение указателя полноты не требует
         n.preview = p == nullptr ? "→ ∅" : "→ " + hexptr(p);
-        // Полное имя unique_ptr не влезает в строку дерева — очеловечиваем;
-        // точный тип остаётся в панели деталей.
-        n.type = "умный указатель на " + type_name<V>();
+        if constexpr (is_complete_v<V>) {
+            // Полное имя unique_ptr не влезает в строку дерева — очеловечиваем;
+            // точный тип остаётся в панели деталей.
+            n.type = "умный указатель на " + type_name<V>();
+        } else {
+            // Умный PIMPL (shared_ptr<Forward>): имя типа НЕ спрашиваем —
+            // type_name<V> зовёт typeid(V), а тому нужен ПОЛНЫЙ тип, и сборка
+            // падала бы прямо здесь, не дойдя до честного отказа в
+            // arm_follow_to. Сырой Forward* этой ветки не проходит и потому
+            // уже работал (ревью Codex, PR #5).
+            n.type = "умный указатель на неполный тип";
+        }
         arm_follow_to(n, p, via);
     }
 }
