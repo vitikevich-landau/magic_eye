@@ -56,6 +56,37 @@ struct WithRawBase : RawBase {
     EYE_DESCRIBE(WithRawBase, own)
 };
 
+// ── типы, на которых nav ЛОМАЛ СБОРКУ (три находки Codex, PR #5) ────────────
+// Все три — про компиляцию: inspect их показывал, а Gallery::add не собирался.
+// Сам факт, что этот файл компилируется, и есть регрессия; ниже мы ещё и
+// проверяем, что отказ объясняется словами, а не молчанием.
+
+// 1) Поле-указатель на функцию: вывести `const U*` из int(*)() невозможно —
+//    const у функционального типа ill-formed.
+int answer_fn() { return 42; }
+struct HasFnPtr {
+    int v = 1;
+    int (*fp)() = &answer_fn;
+    EYE_DESCRIBE(HasFnPtr, v, fp)
+};
+
+// 2) PIMPL: тип известен только по имени. followable_v не имеет права трогать
+//    is_aggregate_v/is_standard_layout_v — на неполном типе это жёсткая ошибка.
+struct Forward;                       // определения нет и не будет
+struct HasPimpl {
+    int v = 2;
+    Forward* impl = nullptr;
+    EYE_DESCRIBE(HasPimpl, v, impl)
+};
+
+// 3) Умный указатель на МАССИВ: pointee — int[], из .get() (int*) указатель на
+//    него не построить; да и длины массив не несёт.
+struct HasArrayPtr {
+    std::unique_ptr<int[]> many = std::make_unique<int[]>(4);
+    std::shared_ptr<int[]> shared;
+    EYE_DESCRIBE(HasArrayPtr, many, shared)
+};
+
 // Ромб с общей virtual-базой: обе ветки ведут к ОДНОМУ Soul — дерево не
 // должно плодить два разворачиваемых узла Soul (ревью Codex, PR #5).
 struct Soul { int spark = 7; EYE_DESCRIBE(Soul, spark) };
@@ -543,6 +574,40 @@ int main() {
                      "opaque base leaked its bytes via auto-inspection");
         ok &= expect(out.find("туман") != std::string::npos,
                      "opaque base detail panel is missing");
+    }
+
+    // ── nav не имеет права ЛОМАТЬ СБОРКУ там, где inspect работает ──────────
+    //    Три находки Codex (PR #5): поле-указатель на функцию, PIMPL-указатель
+    //    и умный указатель на массив роняли КОМПИЛЯЦИЮ Gallery::add. Главная
+    //    регрессия — сам факт, что этот блок собрался; ниже проверяем, что
+    //    отказ от перехода ещё и объясняется словами, а не молчанием.
+    {
+        HasFnPtr fn;
+        const std::string out = run_with_script(
+            "enter down down enter q",
+            [&](eye::Gallery& g) { g.add(fn, "функц-указатель"); });
+        ok &= expect(out.find("указатель на функцию") != std::string::npos,
+                     "function-pointer follow is not refused with a reason");
+    }
+    {
+        HasPimpl pim;
+        // Ненулевой адрес нужен, чтобы дойти до ветки «неполный тип»: проверка
+        // nullptr стоит раньше. Указатель только ПОКАЗЫВАЕТСЯ — переход
+        // заблокирован, разыменования не будет.
+        pim.impl = reinterpret_cast<Forward*>(&pim.v);
+        const std::string out = run_with_script(
+            "enter down down enter q",
+            [&](eye::Gallery& g) { g.add(pim, "PIMPL"); });
+        ok &= expect(out.find("тип неполный") != std::string::npos,
+                     "incomplete pointee follow is not refused with a reason");
+    }
+    {
+        HasArrayPtr arr;
+        const std::string out = run_with_script(
+            "enter down enter q",
+            [&](eye::Gallery& g) { g.add(arr, "массив в умном указателе"); });
+        ok &= expect(out.find("умный указатель на массив") != std::string::npos,
+                     "array smart-pointer follow is not refused with a reason");
     }
 
     // ── пагинация инвалидирует кэш панели деталей (Codex, ABA TreeItem*) ────

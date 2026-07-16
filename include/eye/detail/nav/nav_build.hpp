@@ -37,26 +37,67 @@ inline constexpr bool is_char_like_v =
     std::is_same_v<U, char8_t> || std::is_same_v<U, char16_t> ||
     std::is_same_v<U, char32_t>;
 
+// Полон ли тип В ЭТОЙ единице трансляции? sizeof требует полного типа —
+// классический SFINAE-детектор. Нужен, чтобы не трогать трейты у PIMPL-типов.
+template <class U, class = void>
+struct is_complete_impl : std::false_type {};
+template <class U>
+struct is_complete_impl<U, std::void_t<decltype(sizeof(U))>> : std::true_type {};
+template <class U>
+inline constexpr bool is_complete_v = is_complete_impl<U>::value;
+
 // Умные указатели: unique_ptr / shared_ptr — переход через .get().
 template <class T> struct smart_pointee { using type = void; };
 template <class V, class D> struct smart_pointee<std::unique_ptr<V, D>> {
     using type = V;
 };
 template <class V> struct smart_pointee<std::shared_ptr<V>> { using type = V; };
+// МАССИВНЫЕ специализации гасим: обобщённая ветка выше поймала бы
+// unique_ptr<int[]> с V = int[], и `const V* p = field.get()` означало бы
+// «инициализировать const int(*)[] из int*» — жёсткая ошибка сборки. Да и
+// переходить там некуда: длину массив не несёт (ревью Codex, PR #5).
+template <class V, class D> struct smart_pointee<std::unique_ptr<V[], D>> {
+    using type = void;
+};
+template <class V> struct smart_pointee<std::shared_ptr<V[]>> {
+    using type = void;
+};
 template <class T>
 inline constexpr bool is_smart_ptr_v =
     !std::is_void_v<typename smart_pointee<std::remove_cvref_t<T>>::type>;
 
+// Умный указатель на МАССИВ — отдельным трейтом, чтобы отказать честно
+// (сообщением), а не молча промолчать.
+template <class T> struct is_array_smart_ptr : std::false_type {};
+template <class V, class D>
+struct is_array_smart_ptr<std::unique_ptr<V[], D>> : std::true_type {};
+template <class V>
+struct is_array_smart_ptr<std::shared_ptr<V[]>> : std::true_type {};
+template <class T>
+inline constexpr bool is_array_smart_ptr_v =
+    is_array_smart_ptr<std::remove_cvref_t<T>>::value;
+
 // Тип, у которого есть осмысленный объектный узел (тот же диспетчер, что у
 // панели inspect). Непрозрачные классы не переходимы: карта соврала бы.
+//
+// Полнота проверяется ОТДЕЛЬНОЙ специализацией, а не через && в инициализаторе:
+// && короткозамыкает вычисление, но НЕ инстанцирование, а is_aggregate_v /
+// is_standard_layout_v на неполном типе — жёсткая ошибка сборки. Иначе класс с
+// полем `Forward* p` (PIMPL) переставал бы компилироваться, хотя eye::inspect
+// его показывает (ревью Codex, PR #5).
+template <class U, bool Complete = is_complete_v<U>>
+struct followable_impl : std::false_type {};
 template <class U>
-inline constexpr bool followable_v =
-    (std::is_arithmetic_v<U> && !is_char_like_v<U>) || std::is_enum_v<U> ||
-    std::is_pointer_v<U> || own_described<U> || own_bases<U> ||
-    std::is_same_v<U, std::string> || is_std_vector_v<U> ||
-    is_std_array_v<U> ||
-    (std::is_class_v<U> && std::is_aggregate_v<U> &&
-     std::is_standard_layout_v<U> && !described<U> && !has_bases<U>);
+struct followable_impl<U, true>
+    : std::bool_constant<
+          (std::is_arithmetic_v<U> && !is_char_like_v<U>) ||
+          std::is_enum_v<U> || std::is_pointer_v<U> || own_described<U> ||
+          own_bases<U> || std::is_same_v<U, std::string> ||
+          is_std_vector_v<U> || is_std_array_v<U> ||
+          (std::is_class_v<U> && std::is_aggregate_v<U> &&
+           std::is_standard_layout_v<U> && !described<U> && !has_bases<U>)> {};
+template <class U>
+inline constexpr bool followable_v = followable_impl<U>::value;
 
 template <class T>
 NavNode make_object_node(const T& obj, std::string label = "",
@@ -71,14 +112,18 @@ void arm_follow_to(NavNode& n, const U* p, const std::string& via) {
         n.follow_block = "переход невозможен: nullptr";
         return;
     }
-    if constexpr (std::is_function_v<U>) {
-        n.follow_block = "указатель на функцию: там код, не данные";
-    } else if constexpr (std::is_void_v<U>) {
+    // Про указатель на функцию отвечает arm_follow ДО вызова сюда: вывести
+    // `const U*` из int(*)() нельзя (const у функционального типа ill-formed),
+    // и никакая ветка здесь просто не дожила бы до подстановки.
+    if constexpr (std::is_void_v<U>) {
         n.follow_block = "void*: тип стёрт — Око не гадает";
     } else if constexpr (is_char_like_v<U>) {
         n.follow_block = "C-строка? длина неизвестна — чужое не читаем";
     } else if constexpr (std::is_volatile_v<U>) {
         n.follow_block = "volatile: чтение — побочный эффект, не трогаем";
+    } else if constexpr (!is_complete_v<std::remove_cv_t<U>>) {
+        // PIMPL: определения типа в этой TU нет — ни размера, ни полей.
+        n.follow_block = "тип неполный: определения нет в этой TU (PIMPL?)";
     } else if constexpr (!followable_v<std::remove_cv_t<U>>) {
         n.follow_block = "тип непрозрачен — нужен EYE_DESCRIBE";
     } else {
@@ -95,8 +140,19 @@ void arm_follow_to(NavNode& n, const U* p, const std::string& via) {
 template <class FT>
 void arm_follow(NavNode& n, const FT& field, const std::string& via) {
     using U0 = std::remove_cvref_t<FT>;
-    if constexpr (std::is_pointer_v<U0>) {
+    if constexpr (std::is_pointer_v<U0> &&
+                  std::is_function_v<std::remove_pointer_t<U0>>) {
+        // Указатель на функцию отсекаем ЗДЕСЬ, до arm_follow_to: там параметр
+        // `const U*`, а вывести U из int(*)() нельзя — const у функционального
+        // типа ill-formed, и сборка падала бы ещё на подстановке, не дойдя до
+        // объяснения (ревью Codex, PR #5).
+        n.follow_block = field == nullptr
+                             ? "переход невозможен: nullptr"
+                             : "указатель на функцию: там код, не данные";
+    } else if constexpr (std::is_pointer_v<U0>) {
         arm_follow_to(n, field, via);
+    } else if constexpr (is_array_smart_ptr_v<U0>) {
+        n.follow_block = "умный указатель на массив: длина неизвестна";
     } else if constexpr (is_smart_ptr_v<U0>) {
         using V = typename smart_pointee<U0>::type;
         const V* p = field.get();
@@ -655,11 +711,12 @@ NavNode make_object_node(const T& obj, std::string label, NodeKind kind) {
         arm_follow(n, obj, n.title);
         n.can_expand = true;
         n.expand = [p]() { return make_children<T>(*p); };
-    } else if constexpr (is_smart_ptr_v<T>) {
+    } else if constexpr (is_smart_ptr_v<T> || is_array_smart_ptr_v<T>) {
         // Умный указатель как КОРЕНЬ галереи (Gallery.add(ptr)) ведёт себя как
         // поле-умный-указатель: followable через .get() (g/Enter → *ptr),
         // а НЕ разворачивается в бесполезный «непрозрачный класс». preview и
         // очеловеченный тип ставит сам arm_follow (ревью Codex, PR #5).
+        // Массивный (unique_ptr<int[]>) сюда же — но получит честный отказ.
         arm_follow(n, obj, n.title);
     } else {
         n.can_expand = true;
