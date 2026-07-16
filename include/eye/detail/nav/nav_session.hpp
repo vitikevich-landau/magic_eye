@@ -22,6 +22,7 @@ struct TreeItem {
     bool expanded = false;
     bool loaded = false;                              // дети уже построены?
     std::vector<std::unique_ptr<TreeItem>> kids;
+    TreeItem* shared_of = nullptr;   // общая virtual-база: оригинал в другой ветке
 };
 
 class NavSession {
@@ -64,6 +65,10 @@ public:
     Act expand_current() {
         TreeItem* it = current();
         if (it == nullptr) return Act::none;
+        if (it->shared_of != nullptr) {   // общая virtual-база → прыжок к оригиналу
+            set_cursor_to(it->shared_of);
+            return Act::to_parent;
+        }
         if (it->node.kind == NodeKind::more) return page_more(it);
         if (!it->node.can_expand) return Act::leaf;
         if (!it->loaded) {
@@ -218,11 +223,14 @@ private:
         return k == NodeKind::root || k == NodeKind::object ||
                k == NodeKind::base;
     }
-    void register_item(TreeItem* it) {
+    // Зарегистрировать узел-объект и вернуть ВЛАДЕЛЬЦА ключа (адрес, тип):
+    // либо только что вставленный it, либо ранее занявший этот ключ. Для
+    // нетрекаемых узлов (не-объект/без адреса) владелец — сам it.
+    TreeItem* register_item(TreeItem* it) {
         const NavNode& n = it->node;
         if (n.addr == nullptr || n.type.empty() || !is_object_kind(n.kind))
-            return;
-        materialized_.emplace(MatKey{n.addr, n.type}, it);   // первый — хозяин
+            return it;
+        return materialized_.emplace(MatKey{n.addr, n.type}, it).first->second;
     }
 
     void load_children(TreeItem* it) {
@@ -236,7 +244,20 @@ private:
         item->node = std::move(child);
         item->parent = parent;
         item->depth = parent->depth + 1;
-        register_item(item.get());
+        TreeItem* owner = register_item(item.get());
+        // Тот же под-объект базы УЖЕ есть в дереве (общая virtual-база ромба:
+        // обе ветки ведут к одному Being). Не плодим второй разворачиваемый
+        // узел — метим общим и не разворачиваем; Enter прыгнет к оригиналу.
+        // Так дерево совпадает с картой памяти, где второй помечен «общий».
+        // (Повторная НЕвиртуальная база — РАЗНЫЕ адреса, ключ не совпадёт.)
+        if (item->node.kind == NodeKind::base && owner != item.get()) {
+            item->shared_of = owner;
+            item->node.can_expand = false;
+            item->node.expand = nullptr;
+            item->node.preview += item->node.preview.empty()
+                                      ? "общий (virtual, см. выше)"
+                                      : " · общий (см. выше)";
+        }
         parent->kids.push_back(std::move(item));
     }
 

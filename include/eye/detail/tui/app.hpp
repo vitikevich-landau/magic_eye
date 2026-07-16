@@ -604,11 +604,18 @@ inline void dispatch(App& a, const KeyEvent& e, const Layout& l) {
         case Key::right:
         case Key::enter: {
             TreeItem* it = a.nav.current();
+            const bool followable =
+                it != nullptr &&
+                (it->node.can_follow || !it->node.follow_block.empty());
             const bool leafish =
                 it != nullptr && !it->node.can_expand &&
                 it->node.kind != NodeKind::more;
-            if (!l.wide && !a.narrow_detail && leafish) {
-                a.narrow_detail = true;    // узкий режим: детали на весь кадр
+            // Узкий режим: Enter на НЕ-указательном листе открывает детали на
+            // весь кадр; на листе-указателе — как в широком режиме, ПЕРЕХОДИТ
+            // (или тост при nullptr/непереходимом) через act_expand→act_follow,
+            // а не молча открывает детали (ревью Codex, PR #5).
+            if (!l.wide && !a.narrow_detail && leafish && !followable) {
+                a.narrow_detail = true;
                 break;
             }
             act_expand(a);

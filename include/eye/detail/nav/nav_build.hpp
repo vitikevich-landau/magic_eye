@@ -533,22 +533,28 @@ std::vector<NavNode> make_vector_children(const std::vector<E, A>& v) {
         if (!info.slots_matched && info.data != nullptr)
             kids.push_back(make_note_node(
                 "≈ адресные слоты не распознаны — не называем их наугад"));
-        if (info.data == nullptr || info.size == 0) {
-            kids.push_back(make_note_node("внешнего массива нет: vector пуст"));
+        if (info.data == nullptr) {
+            kids.push_back(make_note_node(
+                "внешнего массива нет: буфер не выделен"));
             return kids;
         }
 
-        // Узел «элементы»: страницы по NAV_PAGE через узел more.
+        // data != null → память ВЫДЕЛЕНА. size==0 при capacity>0 — буфер
+        // зарезервирован, но пуст: узел всё равно показываем (иначе дерево
+        // соврало бы про резерв, который виден на карте памяти), но не
+        // разворачиваем — живых элементов нет (ревью Codex, PR #5).
+        const std::vector<E, A>* pv = std::addressof(v);
         NavNode elems;
         elems.kind = NodeKind::elems;
-        elems.title = "элементы";
+        elems.title = info.size == 0 ? "внешний массив (зарезервирован, пуст)"
+                                     : "элементы";
         elems.type = info.element_type + "[" + std::to_string(info.size) + "]";
         elems.suffix = "@" + hexptr(info.data);
         elems.addr = info.data;
-        elems.size = info.heap_used;
-        elems.can_expand = true;
-        const std::vector<E, A>* pv = std::addressof(v);
-        elems.expand = [pv]() { return make_vector_elem_page(pv, 0); };
+        elems.size = info.heap_reserved;   // резерв целиком, не только живое
+        elems.can_expand = info.size > 0;
+        if (info.size > 0)
+            elems.expand = [pv]() { return make_vector_elem_page(pv, 0); };
         elems.detail = [pv](DetailMode m) {
             if (m == DetailMode::hex) {
                 render_hex_panel("элементы", pv->data(),

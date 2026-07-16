@@ -56,6 +56,17 @@ struct WithRawBase : RawBase {
     EYE_DESCRIBE(WithRawBase, own)
 };
 
+// Ромб с общей virtual-базой: обе ветки ведут к ОДНОМУ Soul — дерево не
+// должно плодить два разворачиваемых узла Soul (ревью Codex, PR #5).
+struct Soul { int spark = 7; EYE_DESCRIBE(Soul, spark) };
+struct MageBr  : virtual Soul { int mana = 1; EYE_BASES(MageBr, Soul) EYE_DESCRIBE(MageBr, mana) };
+struct WarrBr  : virtual Soul { int rage = 2; EYE_BASES(WarrBr, Soul) EYE_DESCRIBE(WarrBr, rage) };
+struct PaladinD : MageBr, WarrBr {
+    int aura = 3;
+    EYE_BASES(PaladinD, MageBr, WarrBr)
+    EYE_DESCRIBE(PaladinD, aura)
+};
+
 namespace {
 
 void set_env(const char* name, const char* value) {
@@ -534,6 +545,58 @@ int main() {
             [&](eye::Gallery& g) { g.add(nums, "числа"); });
         ok &= expect(out.find("╡ #100 ╞") != std::string::npos,
                      "detail panel is stale after paging (TreeItem* ABA)");
+    }
+
+    // ── узкий режим: Enter на листе-указателе ПЕРЕХОДИТ, а не открывает
+    //    детали (ревью Codex, PR #5) ───────────────────────────────────────
+    {
+        set_env("EYE_WIDTH", "80");
+        int mana2 = 350;
+        Scroll sc;
+        sc.power = &mana2;
+        // enter (раскрыть корень) → down (charges) → down (power) → enter.
+        const std::string out = run_with_script(
+            "enter down down enter q",
+            [&](eye::Gallery& g) { g.add(sc, "свиток"); });
+        set_env("EYE_WIDTH", "126");
+        ok &= expect(out.find("*power") != std::string::npos,
+                     "narrow-mode Enter on a pointer leaf did not follow");
+        ok &= expect(out.find("= 350") != std::string::npos,
+                     "narrow-mode pointer follow lost the pointee value");
+    }
+
+    // ── зарезервированный, но пустой vector: узел показан, не «массива нет»
+    //    (ревью Codex, PR #5) ───────────────────────────────────────────────
+    {
+        std::vector<int> reserved;
+        reserved.reserve(8);   // capacity>0, size==0 — буфер выделен, пуст
+        const std::string out = run_with_script(
+            "enter end enter q",
+            [&](eye::Gallery& g) { g.add(reserved, "резерв"); });
+        ok &= expect(out.find("зарезервирован, пуст") != std::string::npos,
+                     "reserved-but-empty vector is not shown as reserved");
+        ok &= expect(out.find("буфер не выделен") == std::string::npos,
+                     "reserved vector wrongly claimed no buffer");
+    }
+
+    // ── ромб: общая virtual-база показана один раз, вторая помечена общей
+    //    (ревью Codex, PR #5) ───────────────────────────────────────────────
+    {
+        PaladinD paladin;
+        // Раскрыть корень, обе базы (MageBr, WarrBr), затем внутри них — Soul.
+        // 'e' раскрывает ветку рекурсивно — оба Soul материализуются.
+        const std::string out = run_with_script(
+            "e q", [&](eye::Gallery& g) { g.add(paladin, "паладин"); });
+        ok &= expect(count_frames(out) >= 1, "diamond produced no frames");
+        // Ровно одна пометка «общий» — второй Soul помечен, не задвоен.
+        const bool shared_once =
+            out.find("общий") != std::string::npos;
+        ok &= expect(shared_once,
+                     "shared virtual base is not marked in the tree");
+        // spark (поле Soul) раскрывается лишь у ОДНОГО (владельца) Soul:
+        // у общего узла раскрытия нет.
+        ok &= expect(out.find("spark") != std::string::npos,
+                     "owner virtual base did not expand its field");
     }
 
     // ── снимок экрана: s пишет кадр в файл чистым текстом ───────────────────
