@@ -104,6 +104,15 @@ std::size_t count_frames(const std::string& s) {
     return n;
 }
 
+// Последний нарисованный кадр (после разделителя «── frame N ──»): нужен там,
+// где предыдущие кадры содержат снятое состояние (скролл, курсор).
+std::string last_frame(const std::string& s) {
+    const std::size_t at = s.rfind("── frame");
+    if (at == std::string::npos) return s;
+    const std::size_t nl = s.find('\n', at);
+    return nl == std::string::npos ? "" : s.substr(nl + 1);
+}
+
 } // namespace
 
 int main() {
@@ -597,6 +606,46 @@ int main() {
         // у общего узла раскрытия нет.
         ok &= expect(out.find("spark") != std::string::npos,
                      "owner virtual base did not expand its field");
+    }
+
+    // ── курсорная строка санируется: \n/ESC в подписи не рвут кадр (Codex) ──
+    {
+        int weird = 5;
+        const std::string out = run_with_script(
+            "q", [&](eye::Gallery& g) { g.add(weird, "bad\nNEXT"); });
+        ok &= expect(out.find("bad NEXT") != std::string::npos,
+                     "cursor row did not sanitize a newline in the label");
+        ok &= expect(out.find("bad\nNEXT") == std::string::npos,
+                     "cursor row leaked a raw newline from the label");
+    }
+
+    // ── узкий режим: Home/End крутят ВИДИМУЮ панель деталей, а не двигают
+    //    скрытый курсор дерева (ревью Codex, PR #5) ─────────────────────────
+    {
+        set_env("EYE_WIDTH", "80");
+        set_env("EYE_HEIGHT", "10");
+        // tab открывает детали рыцаря (высокая панель), end крутит их вниз:
+        // верх («паспорт») уходит за кадр — значит скроллилась панель, а не
+        // курсор дерева (у одного корня cursor_end был бы no-op → верх остался).
+        const std::string top = last_frame(run_with_script(
+            "tab q", [&](eye::Gallery& g) { g.add(knight, "рыцарь"); }));
+        const std::string bottom = last_frame(run_with_script(
+            "tab end q", [&](eye::Gallery& g) { g.add(knight, "рыцарь"); }));
+        set_env("EYE_WIDTH", "126");
+        set_env("EYE_HEIGHT", "40");
+        ok &= expect(top.find("паспорт") != std::string::npos,
+                     "narrow detail top view lost the passport section");
+        ok &= expect(bottom.find("паспорт") == std::string::npos,
+                     "End did not scroll the narrow detail pane (moved tree cursor)");
+        // Home возвращает панель к верху (тоже адресует детали, не дерево).
+        set_env("EYE_WIDTH", "80");
+        set_env("EYE_HEIGHT", "10");
+        const std::string home = last_frame(run_with_script(
+            "tab end home q", [&](eye::Gallery& g) { g.add(knight, "рыцарь"); }));
+        set_env("EYE_WIDTH", "126");
+        set_env("EYE_HEIGHT", "40");
+        ok &= expect(home.find("паспорт") != std::string::npos,
+                     "Home did not scroll the narrow detail pane back to top");
     }
 
     // ── снимок экрана: s пишет кадр в файл чистым текстом ───────────────────

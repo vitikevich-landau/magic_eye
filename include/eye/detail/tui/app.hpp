@@ -168,13 +168,14 @@ inline StyledLine tree_row_line(const TreeItem* it, bool cursor,
                                 std::size_t width, bool active = true) {
     const NavNode& n = it->node;
     if (cursor) {
-        // Курсорная строка — инверсия целиком; внутри без цветов, чтобы
-        // вложенные reset'ы не разрывали фон. Стрелка ► дублирует курсор
         // там, где цветов нет (EYE_COLOR=0, снапшот-тесты). Когда фокус ушёл
         // в детали (Tab), дерево «припарковано»: стрелка полая ▹ и инверсия
         // тусклее (SGR 2) — так видно, куда идут ↑↓/PgUp даже без цвета.
-        std::string plain =
-            (active ? gl_cursor() : gl_cursor_off()) + tree_row_plain(it);
+        // clean_text обязателен: в отличие от нецелевых строк (их санирует
+        // Line::col), тут plain пишется на канву напрямую, а подпись/значение
+        // могут нести \n или ESC из пользовательской строки (Codex, PR #5).
+        std::string plain = clean_text(
+            (active ? gl_cursor() : gl_cursor_off()) + tree_row_plain(it));
         const std::size_t sw = vwidth(n.suffix);
         std::size_t pw = vwidth(plain);
         if (pw + sw + 1 > width) {                 // не влезает — режем текст
@@ -602,12 +603,16 @@ inline void dispatch(App& a, const KeyEvent& e, const Layout& l) {
             else
                 a.nav.move(static_cast<long>(l.body_h));
             break;
+        // Home/End адресуют ту же зону, что и стрелки/PgUp-PgDn: в узком режиме
+        // с открытыми деталями видима ТОЛЬКО панель деталей — крутим её, а не
+        // двигаем скрытый курсор дерева (ревью Codex, PR #5).
         case Key::home:
-            if (a.focus_detail) a.detail_scroll = 0;
+            if (a.focus_detail || (a.narrow_detail && !l.wide)) a.detail_scroll = 0;
             else a.nav.cursor_home();
             break;
         case Key::end:
-            if (a.focus_detail) scroll_detail(a, 1u << 20);
+            if (a.focus_detail || (a.narrow_detail && !l.wide))
+                scroll_detail(a, 1u << 20);
             else a.nav.cursor_end();
             break;
         case Key::right:
