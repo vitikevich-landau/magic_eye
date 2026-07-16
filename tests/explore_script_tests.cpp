@@ -91,6 +91,48 @@ struct HasArrayPtr {
     EYE_DESCRIBE(HasArrayPtr, many, shared)
 };
 
+// ── ещё три, найденные пыточным заходом по экзотическим типам ──────────────
+// 4) Умный указатель на VOLATILE pointee (MMIO-регистр, флаг из обработчика
+//    сигнала). Защита «volatile не трогаем» в arm_follow_to была верной, но
+//    мёртвой: путь умного указателя падал раньше, на hexptr(const void*).
+struct HasVolatilePtr {
+    std::unique_ptr<volatile int> uniq{new volatile int(5)};
+    std::shared_ptr<volatile int> shrd{new volatile int(6)};
+    EYE_DESCRIBE(HasVolatilePtr, uniq, shrd)
+};
+
+// 5) unique_ptr с кастомным делетером, у которого СВОЙ pointer (fancy pointer):
+//    .get() отдаёт Handle, а не int*, и `const V* p = field.get()` не собрать.
+struct Handle {
+    int* raw = nullptr;
+    Handle(std::nullptr_t = nullptr) {}
+    explicit Handle(int* r) : raw(r) {}
+    int& operator*() const { return *raw; }
+    explicit operator bool() const { return raw != nullptr; }
+    friend bool operator==(Handle a, Handle b) { return a.raw == b.raw; }
+};
+struct HandleDel {
+    using pointer = Handle;
+    void operator()(Handle h) const { delete h.raw; }
+};
+struct HasFancyPtr {
+    std::unique_ptr<int, HandleDel> p{Handle{new int(7)}};
+    EYE_DESCRIBE(HasFancyPtr, p)
+};
+
+// 6) Указатель на std::array НУЛЕВОЙ длины с НЕПОЛНЫМ элементом: тело цикла в
+//    collect_array инстанцируется даже при N == 0, и sizeof(E) рвался.
+//    Только libstdc++: у MSVC std::array<T,0> требует ПОЛНЫЙ T (его <array>
+//    зовёт __is_constructible), так что сам тип там вне закона — проверять
+//    нечего. Фикс в collect_array при этом общий и нужен обеим платформам.
+#if defined(__GLIBCXX__)
+#  define EYE_TEST_EMPTY_ARRAY_PTR 1
+struct HasEmptyArrayPtr {
+    std::array<Forward, 0>* f = nullptr;
+    EYE_DESCRIBE(HasEmptyArrayPtr, f)
+};
+#endif
+
 // Ромб с общей virtual-базой: обе ветки ведут к ОДНОМУ Soul — дерево не
 // должно плодить два разворачиваемых узла Soul (ревью Codex, PR #5).
 struct Soul { int spark = 7; EYE_DESCRIBE(Soul, spark) };
@@ -627,6 +669,30 @@ int main() {
             [&](eye::Gallery& g) { g.add(arr, "массив в умном указателе"); });
         ok &= expect(out.find("умный указатель на массив") != std::string::npos,
                      "array smart-pointer follow is not refused with a reason");
+    }
+    // Умный указатель на volatile: защита была мёртвой — путь падал до неё.
+    {
+        HasVolatilePtr vp;
+        const std::string out = run_with_script(
+            "enter down enter q",
+            [&](eye::Gallery& g) { g.add(vp, "volatile в умном указателе"); });
+        ok &= expect(out.find("volatile") != std::string::npos,
+                     "volatile smart-pointee follow is not refused with a reason");
+    }
+    // Fancy pointer и array<Forward,0>* — регрессии ЧИСТО сборочные: до этих
+    // строк дело дойдёт, только если файл вообще скомпилировался.
+    {
+        HasFancyPtr fp;
+        const std::string out = run_with_script(
+            "enter q", [&](eye::Gallery& g) {
+                g.add(fp, "fancy");
+#if defined(EYE_TEST_EMPTY_ARRAY_PTR)
+                static HasEmptyArrayPtr ea;
+                g.add(ea, "пустой массив");
+#endif
+            });
+        ok &= expect(out.find("fancy") != std::string::npos,
+                     "fancy-pointer / empty-array roots are missing from the tree");
     }
 
     // ── пагинация инвалидирует кэш панели деталей (Codex, ABA TreeItem*) ────

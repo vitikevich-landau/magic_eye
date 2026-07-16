@@ -62,9 +62,21 @@ template <class V, class D> struct smart_pointee<std::unique_ptr<V[], D>> {
 template <class V> struct smart_pointee<std::shared_ptr<V[]>> {
     using type = void;
 };
+// …и только если .get() РЕАЛЬНО отдаёт V*. У unique_ptr с кастомным делетером
+// может быть свой FD::pointer (fancy pointer, handle-обёртка) — тогда .get()
+// вернёт его, а не V*, и `const V* p = field.get()` не соберётся. Такой тип для
+// нас просто непрозрачный класс, а не умный указатель (пыточный заход).
+template <class T, class = void>
+struct smart_get_plain : std::false_type {};
+template <class T>
+struct smart_get_plain<T, std::void_t<decltype(std::declval<const T&>().get())>>
+    : std::is_same<decltype(std::declval<const T&>().get()),
+                   typename smart_pointee<T>::type*> {};
+
 template <class T>
 inline constexpr bool is_smart_ptr_v =
-    !std::is_void_v<typename smart_pointee<std::remove_cvref_t<T>>::type>;
+    !std::is_void_v<typename smart_pointee<std::remove_cvref_t<T>>::type> &&
+    smart_get_plain<std::remove_cvref_t<T>>::value;
 
 // Умный указатель на МАССИВ — отдельным трейтом, чтобы отказать честно
 // (сообщением), а не молча промолчать.
@@ -652,9 +664,15 @@ std::vector<NavNode> make_children(const T& obj) {
         return make_vector_children(obj);
     } else if constexpr (is_std_array_v<T>) {
         std::vector<NavNode> kids;
-        for (std::size_t i = 0; i < obj.size(); ++i)
-            kids.push_back(make_typed_field_node(
-                "#" + std::to_string(i), obj[i], base, sizeof(T)));
+        // Тело цикла инстанцируется ДАЖЕ при N == 0 (цикл рантайменый, не
+        // if constexpr), поэтому std::array<Forward,0> ронял sizeof неполного
+        // элемента. У пустого массива элементов нет и показывать нечего —
+        // честно отдаём пусто (пыточный заход по экзотическим типам).
+        if constexpr (std::tuple_size_v<T> > 0) {
+            for (std::size_t i = 0; i < obj.size(); ++i)
+                kids.push_back(make_typed_field_node(
+                    "#" + std::to_string(i), obj[i], base, sizeof(T)));
+        }
         return kids;
     } else if constexpr (std::is_class_v<T> && std::is_aggregate_v<T> &&
                          std::is_standard_layout_v<T> && !described<T> &&

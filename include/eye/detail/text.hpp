@@ -132,8 +132,13 @@ inline std::string hex4(std::size_t x) {          // 0x001c
     std::snprintf(b, sizeof(b), "0x%04zx", static_cast<std::size_t>(x));
     return b;
 }
-inline std::string hexptr(const void* p) {         // 0x55f3...
-    std::ostringstream o; o << p; return o.str();
+// Печатает АДРЕС, а не то, что по нему лежит, поэтому принимает и volatile:
+// умный указатель на volatile pointee (MMIO-регистр, флаг из обработчика
+// сигнала) — законный тип, а отказ от перехода по нему формулируется отдельно
+// (arm_follow_to). Снятие volatile тут безопасно: значение указателя уже на
+// руках, чтения по адресу не происходит.
+inline std::string hexptr(const volatile void* p) {   // 0x55f3...
+    std::ostringstream o; o << const_cast<const void*>(p); return o.str();
 }
 inline std::string hex2(unsigned char b) {         // 1b
     char s[4];
