@@ -62,14 +62,21 @@ struct Layout {
 inline Layout compute_layout(TermSize s) {
     Layout l;
     l.size = s;
-    l.wide = s.cols >= 100;
     l.body_h = s.rows > 2 ? s.rows - 2 : 1;
     l.status_y = s.rows > 0 ? s.rows - 1 : 0;
-    if (l.wide) {
-        l.tree_w = std::max<std::size_t>(38, s.cols * 2 / 5);
-        l.det_x = l.tree_w + 1;                    // 1 колонка — спайн ║
-        l.det_w = s.cols - l.det_x;
+    // Широкий режим — только если правая зона реально вмещает МИНИМАЛЬНУЮ рамку
+    // деталей целиком (MIN_FRAME_W + 4 на рамку «║ … ║»). Иначе на ~100–106
+    // колонках зона деталей вышла бы 59–63 и панель сразу резалась бы
+    // многоточием, тогда как узкий режим показал бы её без потерь (Codex, PR #5).
+    const std::size_t tree_w = std::max<std::size_t>(38, s.cols * 2 / 5);
+    const std::size_t det_w = s.cols > tree_w + 1 ? s.cols - tree_w - 1 : 0;
+    if (s.cols >= 100 && det_w >= MIN_FRAME_W + 4) {
+        l.wide = true;
+        l.tree_w = tree_w;
+        l.det_x = tree_w + 1;                      // 1 колонка — спайн ║
+        l.det_w = det_w;
     } else {
+        l.wide = false;
         l.tree_w = s.cols;
         l.det_x = 0;
         l.det_w = s.cols;
@@ -757,13 +764,19 @@ inline void run_live(App& a) {
 
 // Точка входа галереи. Правила деградации — в шапке файла.
 inline void run_gallery(std::vector<NavNode> roots) {
-    const std::vector<std::string> tokens = script_tokens();
+    // EYE_INTERACTIVE=0 отключает TUI ЦЕЛИКОМ, включая скриптовый режим: иначе
+    // унаследованный из окружения EYE_SCRIPT заставил бы CI/шелл печатать
+    // TUI-кадры вместо обещанной статики inspect (ревью Codex, PR #5).
+    const std::string force = env_value("EYE_INTERACTIVE");
+    const bool opted_out = !force.empty() && force.front() == '0';
+    const std::vector<std::string> tokens =
+        opted_out ? std::vector<std::string>{} : script_tokens();
     if (!tokens.empty()) {
         App a(std::move(roots));
         run_scripted(a, tokens);
         return;
     }
-    if (!TermSession::interactive_capable()) {
+    if (!TermSession::interactive_capable()) {   // ложь при EYE_INTERACTIVE=0
         for (NavNode& r : roots)
             if (r.print_static) r.print_static();
         return;

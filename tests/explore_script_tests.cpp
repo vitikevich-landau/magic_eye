@@ -252,6 +252,32 @@ int main() {
         set_env("EYE_WIDTH", "126");
     }
 
+    // ── EYE_INTERACTIVE=0 бьёт скриптовый режим: статика, а не TUI-кадры
+    //    (ревью Codex, PR #5) ──────────────────────────────────────────────
+    {
+        set_env("EYE_INTERACTIVE", "0");
+        const std::string out = run_with_script(   // EYE_SCRIPT задан, но…
+            "enter q", [&](eye::Gallery& g) { g.add(knight, "рыцарь"); });
+        set_env("EYE_INTERACTIVE", "");
+        ok &= expect(out.find("── frame") == std::string::npos,
+                     "EYE_INTERACTIVE=0 still emitted TUI frames");
+        ok &= expect(out.find("╔═◈╡ рыцарь") != std::string::npos,
+                     "EYE_INTERACTIVE=0 did not fall back to static inspect");
+    }
+
+    // ── широкий режим не включается, пока зона деталей не вмещает рамку:
+    //    на 100 колонках — узкий (детали иначе резались бы) (Codex, PR #5) ──
+    {
+        set_env("EYE_WIDTH", "100");
+        const std::string out = run_with_script(
+            "q", [&](eye::Gallery& g) { g.add(knight, "рыцарь"); });
+        // Узкий режим: панели деталей рядом с деревом нет → нет спайна ║ в
+        // строках дерева и нет секции «паспорт» в кадре до Tab.
+        ok &= expect(out.find("паспорт") == std::string::npos,
+                     "100-col terminal wrongly opened a clipped wide detail pane");
+        set_env("EYE_WIDTH", "126");
+    }
+
     // ── деградация: без скрипта и без TTY — статическая печать ──────────────
     {
         set_env("EYE_SCRIPT", "");
