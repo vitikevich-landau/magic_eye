@@ -240,6 +240,18 @@ int main() {
         set_env("EYE_WIDTH", "126");
     }
 
+    // ── узкий режим: Tab показывает детали РАЗВОРАЧИВАЕМОГО узла (Codex) ─────
+    {
+        set_env("EYE_WIDTH", "80");
+        // Корень «рыцарь» разворачиваемый: Enter на нём только раскрывает
+        // дерево. Детали такого узла в узком режиме доступны через Tab.
+        const std::string out = run_with_script(
+            "tab q", [&](eye::Gallery& g) { g.add(knight, "рыцарь"); });
+        ok &= expect(out.find("паспорт") != std::string::npos,
+                     "narrow-mode Tab did not open details for an expandable node");
+        set_env("EYE_WIDTH", "126");
+    }
+
     // ── деградация: без скрипта и без TTY — статическая печать ──────────────
     {
         set_env("EYE_SCRIPT", "");
@@ -343,6 +355,22 @@ int main() {
                      "smart pointer is not marked in the tree");
         ok &= expect(out.find("= 777") != std::string::npos,
                      "unique_ptr pointee value is missing");
+    }
+
+    // ── умный указатель как КОРЕНЬ галереи: Enter/g ведёт к *ptr, а не в
+    //    «непрозрачный класс» (ревью Codex, PR #5) ────────────────────────────
+    {
+        auto ingot = std::make_unique<int>(999);
+        const std::string out = run_with_script(
+            "enter q", [&](eye::Gallery& g) { g.add(ingot, "слиток"); });
+        ok &= expect(out.find("умный указатель на int") != std::string::npos,
+                     "smart-pointer root is not marked as a smart pointer");
+        ok &= expect(out.find("*слиток") != std::string::npos,
+                     "Enter on a smart-pointer root did not follow to *ptr");
+        ok &= expect(out.find("= 999") != std::string::npos,
+                     "smart-pointer root pointee value is missing");
+        ok &= expect(out.find("непрозрачный класс") == std::string::npos,
+                     "smart-pointer root fell through to opaque expansion");
     }
 
     // ── pointee-агрегат: раскрывается дальше (поля #0…) ─────────────────────

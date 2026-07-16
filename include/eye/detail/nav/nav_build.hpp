@@ -625,15 +625,24 @@ NavNode make_object_node(const T& obj, std::string label, NodeKind kind) {
     n.size = sizeof(T);
     n.suffix = "@" + hexptr(std::addressof(obj));
     n.has_vtable = std::is_polymorphic_v<T>;
+    const T* p = std::addressof(obj);
     if constexpr (!std::is_class_v<T>) {
         FieldInfo f = self_field(obj);
         n.preview = "= " + clip(f.value, 16);
         // Корень/pointee сам является указателем — с него можно идти дальше.
         arm_follow(n, obj, n.title);
+        n.can_expand = true;
+        n.expand = [p]() { return make_children<T>(*p); };
+    } else if constexpr (is_smart_ptr_v<T>) {
+        // Умный указатель как КОРЕНЬ галереи (Gallery.add(ptr)) ведёт себя как
+        // поле-умный-указатель: followable через .get() (g/Enter → *ptr),
+        // а НЕ разворачивается в бесполезный «непрозрачный класс». preview и
+        // очеловеченный тип ставит сам arm_follow (ревью Codex, PR #5).
+        arm_follow(n, obj, n.title);
+    } else {
+        n.can_expand = true;
+        n.expand = [p]() { return make_children<T>(*p); };
     }
-    const T* p = std::addressof(obj);
-    n.can_expand = true;
-    n.expand = [p]() { return make_children<T>(*p); };
     n.detail = [p, title = n.title](DetailMode m) {
         if (m == DetailMode::hex) {
             render_hex_panel(title, p, sizeof(T));

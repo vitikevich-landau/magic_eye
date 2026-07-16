@@ -600,7 +600,12 @@ inline void dispatch(App& a, const KeyEvent& e, const Layout& l) {
             act_back(a);
             break;
         case Key::tab:
-            a.focus_detail = !a.focus_detail;
+            // Широкий режим: фокус между зонами дерево↔детали. Узкий: зон две
+            // нет — Tab показывает/прячет панель деталей ТЕКУЩЕГО узла, в т.ч.
+            // разворачиваемого (Enter на нём только раскрывает дерево, а детали
+            // иначе не увидеть) — ревью Codex, PR #5.
+            if (l.wide) a.focus_detail = !a.focus_detail;
+            else a.narrow_detail = !a.narrow_detail;
             break;
         case Key::esc:
             if (a.narrow_detail && !l.wide) a.narrow_detail = false;
