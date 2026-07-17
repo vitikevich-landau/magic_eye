@@ -46,6 +46,18 @@ struct is_complete_impl<U, std::void_t<decltype(sizeof(U))>> : std::true_type {}
 template <class U>
 inline constexpr bool is_complete_v = is_complete_impl<U>::value;
 
+// Элемент std::vector — для гейта полноты. Сам vector законно живёт с
+// НЕПОЛНЫМ элементом (C++17): sizeof(vector<Forward>) работает, и верхний
+// гейт полноты pointee он проходит. А вот vector_info внутри зовёт sizeof(E) —
+// без гейта по элементу поле vector<Forward>* роняло бы сборку Gallery::add
+// даже при nullptr (ревью Codex, PR #5).
+template <class T> struct vector_element { using type = void; };
+template <class E, class A> struct vector_element<std::vector<E, A>> {
+    using type = E;
+};
+template <class T>
+using vector_element_t = typename vector_element<std::remove_cvref_t<T>>::type;
+
 // Умные указатели: unique_ptr / shared_ptr — переход через .get().
 template <class T> struct smart_pointee { using type = void; };
 template <class V, class D> struct smart_pointee<std::unique_ptr<V, D>> {
@@ -116,7 +128,8 @@ struct followable_impl<U, true>
           (std::is_arithmetic_v<U> && !is_char_like_v<U>) ||
           std::is_enum_v<U> || std::is_pointer_v<U> || own_described<U> ||
           own_bases<U> || std::is_same_v<U, std::string> ||
-          is_std_vector_v<U> || is_std_array_v<U> ||
+          (is_std_vector_v<U> && is_complete_v<vector_element_t<U>>) ||
+          is_std_array_v<U> ||
           (std::is_class_v<U> && std::is_aggregate_v<U> &&
            std::is_standard_layout_v<U> && !described<U> && !has_bases<U> &&
            (brace_probe_consistent_v<U> || has_array_member_v<U>))> {};
@@ -148,6 +161,10 @@ void arm_follow_to(NavNode& n, const U* p, const std::string& via) {
     } else if constexpr (!is_complete_v<std::remove_cv_t<U>>) {
         // PIMPL: определения типа в этой TU нет — ни размера, ни полей.
         n.follow_block = "тип неполный: определения нет в этой TU (PIMPL?)";
+    } else if constexpr (is_std_vector_v<std::remove_cv_t<U>> &&
+                         !is_complete_v<vector_element_t<U>>) {
+        // vector с неполным элементом полный сам по себе — причина отказа своя.
+        n.follow_block = "элемент vector неполный: не разобрать (PIMPL?)";
     } else if constexpr (!followable_v<std::remove_cv_t<U>>) {
         n.follow_block = "тип непрозрачен — нужен EYE_DESCRIBE";
     } else {

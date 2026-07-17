@@ -92,6 +92,17 @@ struct HasArrayPtr {
     EYE_DESCRIBE(HasArrayPtr, many, shared)
 };
 
+// 6б) Указатель на std::vector с НЕПОЛНЫМ элементом: сам vector — полный тип
+//     (C++17 разрешает неполный элемент), верхний гейт полноты он проходит,
+//     а vector_info внутри зовёт sizeof(E) — сборка падала даже при nullptr.
+//     shared_ptr-вариант той же дорогой (unique_ptr сюда нельзя: его
+//     деструктору нужен полный Forward — ограничение языка, не наше).
+struct HasVecPimpl {
+    std::vector<Forward>* vp = nullptr;
+    std::shared_ptr<std::vector<Forward>> svp;
+    EYE_DESCRIBE(HasVecPimpl, vp, svp)
+};
+
 // 7) Указатель на агрегат с atomic-членом: followable_v обязан спросить гейт
 //    проб (как visit_fields) и отказать СЛОВАМИ там, где авторазбор pointee
 //    сломался бы, — а не ронять сборку Gallery::add владельца указателя.
@@ -672,6 +683,17 @@ int main() {
             [&](eye::Gallery& g) { g.add(pim, "PIMPL"); });
         ok &= expect(out.find("тип неполный") != std::string::npos,
                      "incomplete pointee follow is not refused with a reason");
+    }
+    // vector с неполным элементом: сборка живёт, переход отказывает словами.
+    {
+        int stub = 0;
+        HasVecPimpl vpim;
+        vpim.vp = reinterpret_cast<std::vector<Forward>*>(&stub);
+        const std::string out = run_with_script(
+            "enter down enter q",
+            [&](eye::Gallery& g) { g.add(vpim, "vector-PIMPL"); });
+        ok &= expect(out.find("элемент vector неполный") != std::string::npos,
+                     "incomplete vector element follow is not refused");
     }
     {
         HasArrayPtr arr;
