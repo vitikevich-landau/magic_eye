@@ -51,4 +51,22 @@ if(BUILD_TESTING)
     # Тесты сравнивают текст без ANSI и не трогают консоль Windows.
     set_tests_properties(magic_eye_tests PROPERTIES
         ENVIRONMENT "EYE_COLOR=0;EYE_CENTER=0;EYE_RESIZE=0")
+
+    # Ядро TUI: декодер клавиш и канва — чистые юниты, терминал не нужен.
+    add_executable(tui_core_tests tests/tui_core_tests.cpp)
+    target_link_libraries(tui_core_tests PRIVATE magic_eye)
+    add_test(NAME tui_core_tests COMMAND tui_core_tests)
+    set_tests_properties(tui_core_tests PROPERTIES
+        ENVIRONMENT "EYE_COLOR=0;EYE_CENTER=0;EYE_RESIZE=0")
+
+    # Странствие (explore/Gallery): снапшоты кадров через EYE_SCRIPT.
+    add_executable(explore_script_tests tests/explore_script_tests.cpp)
+    target_link_libraries(explore_script_tests PRIVATE magic_eye)
+    add_test(NAME explore_script_tests COMMAND explore_script_tests)
+    set_tests_properties(explore_script_tests PROPERTIES
+        ENVIRONMENT "EYE_COLOR=0;EYE_CENTER=0;EYE_RESIZE=0")
+
+    # Ручная проба TUI (стрелки/resize/выход) — собирается, в ctest не входит.
+    add_executable(tui_demo tests/tui_demo.cpp)
+    target_link_libraries(tui_demo PRIVATE magic_eye)
 endif()

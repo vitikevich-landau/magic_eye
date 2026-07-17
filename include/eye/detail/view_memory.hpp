@@ -449,7 +449,8 @@ inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
                           const std::vector<std::size_t>& vbase_offsets,
                           const void* addr, bool opaque, bool standalone,
                           const VectorInfo* vector = nullptr,
-                          const std::vector<OpaqueSpan>& opaque_spans = {}) {
+                          const std::vector<OpaqueSpan>& opaque_spans = {},
+                          const std::string& opaque_note = "") {
     const bool poly = !vptr_offsets.empty();
     const auto* base = static_cast<const unsigned char*>(addr);
     // Реестр мог перечислить поля не по порядку — сортируем по offset, иначе
@@ -463,9 +464,13 @@ inline void render_memory(std::vector<FieldInfo> fields, std::size_t total,
     const bool inherited = !opaque_spans.empty() ||
         std::any_of(fields.begin(), fields.end(),
                     [](const FieldInfo& f) { return f.base_depth > 0; });
-    const std::string opaque_why = vector == nullptr
-        ? ""
-        : "роль зависит от STL и режима Debug/Release";
+    // Точная причина от зовущего (он знает тип) важнее общей: иначе плоский
+    // агрегат с не-standard-layout полем объяснялся бы «private/конструкторы».
+    const std::string opaque_why =
+        !opaque_note.empty()
+            ? opaque_note
+            : (vector == nullptr ? ""
+                                 : "роль зависит от STL и режима Debug/Release");
     const auto regions = build_regions(fields, total, vptr_offsets, vbase_offsets,
                                        opaque, opaque_why, opaque_spans);
 

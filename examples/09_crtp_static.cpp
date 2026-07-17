@@ -11,6 +11,8 @@
 // ============================================================================
 #include <eye/magic_eye.hpp>
 
+#include <string>
+
 template <class Derived>
 class Shape {
     int id = 0;
@@ -42,11 +44,15 @@ public:
 };
 
 int main() {
+    // ТЕРМИНАЛ → интерактивный обозреватель. Сравни с примером 06: в паспорте
+    // «полиморфный ◇ нет», узла vptr в дереве НЕТ, первое поле лежит с offset 0.
+    // area() — статический вызов наследника (без virtual), кладём в подпись.
+    // Стрелки/Enter/q, ? — помощь. Пайп/файл → те же панели статикой.
     Circle circle;
-    std::cout << "area(Circle) = " << circle.area() << "\n";
-    eye::inspect(circle, "круг (CRTP: Circle : Shape<Circle>)");
-
     Square square;
-    std::cout << "area(Square) = " << square.area() << "\n";
-    eye::inspect(square, "квадрат (CRTP: Square : Shape<Square>)");
+
+    eye::Gallery{}
+        .add(circle, "круг · area()=" + std::to_string(circle.area()))
+        .add(square, "квадрат · area()=" + std::to_string(square.area()))
+        .run();
 }

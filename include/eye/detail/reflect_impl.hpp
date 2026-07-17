@@ -318,18 +318,24 @@ std::vector<FieldInfo> collect(const T& obj) {
 template <class E, std::size_t N>
 std::vector<FieldInfo> collect_array(const std::array<E, N>& arr) {
     std::vector<FieldInfo> fields;
-    const auto* base = reinterpret_cast<const unsigned char*>(std::addressof(arr));
-    for (std::size_t i = 0; i < N; ++i) {
-        const E& e = arr[i];
-        FieldInfo fi;
-        fi.name   = "#" + std::to_string(i);
-        fi.offset = static_cast<std::size_t>(
-            reinterpret_cast<const unsigned char*>(std::addressof(e)) - base);
-        fi.size  = sizeof(E);
-        fi.type  = type_name<E>();
-        fi.value = stringify<E>(e);
-        annotate<E>(fi, e);
-        fields.push_back(std::move(fi));
+    // Тело цикла инстанцируется ДАЖЕ при N == 0 (цикл рантаймовый, не
+    // if constexpr), а std::array<E,0> с НЕПОЛНЫМ E законен и полезен — на нём
+    // рвались sizeof(E)/type_name<E>. Элементов там нет, показывать нечего.
+    if constexpr (N > 0) {
+        const auto* base =
+            reinterpret_cast<const unsigned char*>(std::addressof(arr));
+        for (std::size_t i = 0; i < N; ++i) {
+            const E& e = arr[i];
+            FieldInfo fi;
+            fi.name   = "#" + std::to_string(i);
+            fi.offset = static_cast<std::size_t>(
+                reinterpret_cast<const unsigned char*>(std::addressof(e)) - base);
+            fi.size  = sizeof(E);
+            fi.type  = type_name<E>();
+            fi.value = stringify<E>(e);
+            annotate<E>(fi, e);
+            fields.push_back(std::move(fi));
+        }
     }
     return fields;
 }
@@ -360,7 +366,11 @@ VtableSite read_vtable_site(const T& obj, std::size_t offset,
     s.offset = offset;
     s.owner  = owner;
     void* vptr = nullptr;
-    std::memcpy(&vptr, std::addressof(obj), sizeof(vptr));  // начало под-объекта = vptr
+    // Каст в void* — сознательный сигнал Clang'у (-Wdynamic-class-memaccess):
+    // обычно memcpy из полиморфного объекта — баг, здесь же чтение vptr байтами
+    // и есть работа Ока. Начало под-объекта = vptr.
+    std::memcpy(&vptr, static_cast<const void*>(std::addressof(obj)),
+                sizeof(vptr));
     s.vptr = vptr;
     s.dyn_type = type_name_of(typeid(obj));  // динамический тип (RTTI, самый производный)
 #if EYE_ITANIUM_ABI

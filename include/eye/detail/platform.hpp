@@ -9,9 +9,12 @@
 #  include <io.h>             // _isatty, _fileno
 #  include <windows.h>        // кодовая страница, ANSI (VT), ширина консоли
 #else
+#  include <poll.h>           // poll — ожидание клавиши TUI без сжигания CPU
 #  include <sys/ioctl.h>      // TIOCGWINSZ — ширина терминала
-#  include <unistd.h>         // isatty, fileno — POSIX
+#  include <termios.h>        // raw-режим терминала (интерактивное Око)
+#  include <unistd.h>         // isatty, fileno, read/write — POSIX
 #endif
+#include <csignal>   // SIGWINCH/SIGTERM — восстановление терминала TUI
 #include <cstdlib>   // std::getenv / _dupenv_s, std::free
 #include <string>
 

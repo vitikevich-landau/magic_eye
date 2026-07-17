@@ -82,6 +82,41 @@ inline std::string clip_ansi(const std::string& s, std::size_t maxcp) {
     return out;
 }
 
+// Убрать из готовой строки все CSI-последовательности (цвет, инверсию):
+// снимок экрана уходит в файл чистым текстом, читаемым любым редактором.
+inline std::string strip_ansi(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (std::size_t i = 0; i < s.size();) {
+        if (s[i] == '\033' && i + 1 < s.size() && s[i + 1] == '[') {
+            std::size_t j = i + 2;   // параметры — до финального байта @…~
+            while (j < s.size() &&
+                   !(static_cast<unsigned char>(s[j]) >= 0x40 &&
+                     static_cast<unsigned char>(s[j]) <= 0x7e))
+                ++j;
+            i = j < s.size() ? j + 1 : s.size();
+            continue;
+        }
+        out += s[i++];
+    }
+    return out;
+}
+
+// Видимая ширина УЖЕ собранной строки с ANSI-кодами: CSI-последовательности
+// не занимают колонок, остальное считается кодовыми точками (как vwidth).
+inline std::size_t vwidth_ansi(const std::string& s) {
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < s.size();) {
+        if (s[i] == '\033' && i + 1 < s.size() && s[i + 1] == '[') {
+            const std::size_t end = s.find('m', i + 2);
+            if (end != std::string::npos) { i = end + 1; continue; }
+        }
+        if ((static_cast<unsigned char>(s[i]) & 0xC0) != 0x80) ++n;
+        ++i;
+    }
+    return n;
+}
+
 inline std::string ljust(std::string s, std::size_t w) {
     const std::size_t v = vwidth(s);
     if (v < w) s.append(w - v, ' ');
@@ -97,8 +132,13 @@ inline std::string hex4(std::size_t x) {          // 0x001c
     std::snprintf(b, sizeof(b), "0x%04zx", static_cast<std::size_t>(x));
     return b;
 }
-inline std::string hexptr(const void* p) {         // 0x55f3...
-    std::ostringstream o; o << p; return o.str();
+// Печатает АДРЕС, а не то, что по нему лежит, поэтому принимает и volatile:
+// умный указатель на volatile pointee (MMIO-регистр, флаг из обработчика
+// сигнала) — законный тип, а отказ от перехода по нему формулируется отдельно
+// (arm_follow_to). Снятие volatile тут безопасно: значение указателя уже на
+// руках, чтения по адресу не происходит.
+inline std::string hexptr(const volatile void* p) {   // 0x55f3...
+    std::ostringstream o; o << const_cast<const void*>(p); return o.str();
 }
 inline std::string hex2(unsigned char b) {         // 1b
     char s[4];

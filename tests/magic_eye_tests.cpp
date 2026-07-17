@@ -1,11 +1,82 @@
 #include <eye/magic_eye.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <vector>
+
+// --- детектор «член ломает подсчёт полей» (brace_probe_consistent_v) ---------
+// Compile-time регрессия: если правка field_count собьёт детектор, EYE_DESCRIBE-
+// подсказка на std::atomic перестанет срабатывать (или начнёт врать на хороших
+// агрегатах). Проверяем оба конца.
+namespace probe_ns {
+struct PlainAgg  { int x; int y; };                 // хороший — детектор молчит
+struct NestedAgg { int a; PlainAgg p; };            // вложенный — тоже молчит
+struct StrAgg    { int a; std::string s; };         // std::string — не ломает счёт
+static_assert(eye::detail::brace_probe_consistent_v<PlainAgg>,
+              "детектор ложно сработал на простом агрегате");
+static_assert(eye::detail::brace_probe_consistent_v<NestedAgg>,
+              "детектор ложно сработал на вложенном агрегате");
+static_assert(eye::detail::brace_probe_consistent_v<StrAgg>,
+              "детектор ложно сработал на агрегате со std::string");
+// Полей больше, чем байтов, — валидно: битовые поля и [[no_unique_address]].
+// Прежний ограничитель пробников (sizeof+1) РОНЯЛ на таких типах сборку даже
+// inspect. Теперь пробник тотальный: 9+ полей — потолок FIELD_COUNT_CAP и
+// честное «скрыто», а компактная пустышечная структура разбирается (Codex).
+struct Bits9 { unsigned a:1,b:1,c:1,d:1,e:1,f:1,g:1,h:1,i:1; };
+struct Empt1 {}; struct Empt2 {}; struct Empt3 {};
+struct NuaAgg {
+    [[no_unique_address]] Empt1 e1;
+    [[no_unique_address]] Empt2 e2;
+    [[no_unique_address]] Empt3 e3;
+};
+static_assert(eye::detail::field_count<Bits9>() > 8,
+              "9 битовых полей должны упереться в потолок, а не в ошибку");
+// NuaAgg: braced-проба честно даёт 0 (пустышка отвергает {any} как агрегат без
+// членов), flat — 3 (any конвертируется в E напрямую). Расхождение безвредно:
+// при нуле полей раскладки нет, гейт молчит. Ассертим только тотальность —
+// сам факт, что эти строки скомпилировались; точные значения — деталь платформ
+// (MSVC вообще игнорирует [[no_unique_address]] без msvc::-префикса).
+static_assert(eye::detail::field_count<NuaAgg>() <= 8,
+              "пробник должен пережить [[no_unique_address]], не взорвавшись");
+
+// C-массив создаёт расхождение счётчиков ЛОЖНО (elision в flat-пробе), и
+// детектор обязан его пропускать: field_count для массива верен, structured
+// bindings отдают его одной привязкой, разбор работает (Codex, PR #5).
+// Ассертим только то, на что опираемся: сам ГЕЙТ visit_fields и распознавание
+// массива — а не случайные значения счётчиков (урок Clang/atomic).
+struct ArrAgg { char tag[4]; };
+struct ArrMix { int n; char tag[4]; };
+static_assert(eye::detail::brace_probe_consistent_v<ArrAgg> ||
+                  eye::detail::has_array_member_v<ArrAgg>,
+              "агрегат с C-массивом не проходит гейт — inspect не соберётся");
+static_assert(eye::detail::has_array_member_v<ArrMix>,
+              "C-массив не первым полем не распознан");
+// НЕ ассертим has_array_member_v для StrAgg/NestedAgg: у них он честно true
+// (string принимает {any,any} через ctor(const char*, size_t), вложенный
+// агрегат с ≥2 полями — через агрегатную инициализацию), но они consistent —
+// гейт их и не спрашивает. Несущая проверка одна: чистый скалярный агрегат.
+static_assert(!eye::detail::has_array_member_v<PlainAgg>,
+              "детектор массивов ложно сработал на скалярном агрегате");
+
+// std::atomic ломает подсчёт полей ТОЛЬКО у GCC: его overload resolution
+// отвергает {any}-копию atomic в счётчике. Гейт по __GLIBCXX__ мало: Clang
+// тоже сидит на libstdc++ (__GLIBCXX__ определён), но пробу разрешает иначе —
+// детектор молчит, и это ПРАВИЛЬНО: замерено на Clang 17, field_count даёт 2 и
+// агрегат с atomic честно разбирается автоматикой, как на MSVC (там тоже
+// замерено). Негативный assert — проверка GCC-специфичного поведения
+// (ревью Codex, PR #5).
+#if defined(__GLIBCXX__) && defined(__GNUC__) && !defined(__clang__)
+struct AtomicAgg { int a; std::atomic<int> f; };
+static_assert(!eye::detail::brace_probe_consistent_v<AtomicAgg>,
+              "детектор НЕ поймал std::atomic — EYE_DESCRIBE-подсказка молчит");
+static_assert(!eye::detail::has_array_member_v<AtomicAgg>,
+              "atomic принят за массив — гейт пропустит его к криптоошибке");
+#endif
+}  // namespace probe_ns
 
 // Наследование проверяем на типах в ГЛОБАЛЬНОЙ области — тогда имена типов
 // коротки ("BaseA", а не "(anonymous namespace)::BaseA") и метки совпадают.
@@ -68,7 +139,7 @@ struct WithRawBase : RawBase {
 
 // --- НЕагрегатная (private + ctor) непрозрачная база — байты скрыты, не padding
 class PrivBase {
-    int hidden = 1;
+    [[maybe_unused]] int hidden = 1;   // нарочно не читается: тест «байты скрыты»
 public:
     PrivBase() = default;
 };
@@ -241,11 +312,31 @@ int main() {
                      std::string::npos,
                  "stable field number is missing");
     // Инклюзивный диапазон рисуется у МНОГОстрочных регионов (у однострочных он
-    // дублировал бы offset слева и в двухзонном режиме гасится). Третий кусок
-    // heap-строки (.cap/.buf) — 16 Б, 2 строки — диапазон сохраняет.
-    ok &= expect(wide.find("в объекте: +0x0018…+0x0027") !=
-                     std::string::npos,
-                 "inclusive field byte range is missing");
+    // дублировал бы offset слева и в двухзонном режиме гасится). А вот КАКОЙ
+    // регион окажется многострочным — решает STL, поэтому числа не зашиваем:
+    //   • libstdc++ заявляет раскладку строки (str_layout) и бьёт поле на
+    //     .ptr/.len/.cap — многострочен третий кусок: 16 Б от +0x10 внутри поля;
+    //   • прочие STL (MSVC) раскладку не заявляют — строка идёт ОДНИМ куском,
+    //     и многострочно всё поле (32 Б в Release, 40 Б в Debug: /MDd добавляет
+    //     в строку debug-proxy).
+    {
+        // Смещение поля берём живьём: offsetof на не-standard-layout типе
+        // условно-поддерживаем и ловит -Winvalid-offsetof (а со std::string в
+        // MSVC Debug тип именно такой). Модель считает его ровно так же.
+        LongNames probe;
+        const std::size_t text_off = static_cast<std::size_t>(
+            reinterpret_cast<const unsigned char*>(&probe.text) -
+            reinterpret_cast<const unsigned char*>(&probe));
+#if defined(__GLIBCXX__)
+        const std::size_t from = text_off + 16, len = 16;
+#else
+        const std::size_t from = text_off, len = sizeof(std::string);
+#endif
+        const std::string range = "в объекте: +" + eye::detail::hex4(from) +
+                                  "…+" + eye::detail::hex4(from + len - 1);
+        ok &= expect(wide.find(range) != std::string::npos,
+                     "inclusive field byte range is missing");
+    }
     ok &= expect(wide.find("► КУЧА @ ") != std::string::npos &&
                      wide.find("#2 text.ptr ведёт во внешний блок") !=
                          std::string::npos,
@@ -299,6 +390,34 @@ int main() {
                  "raw ANSI escape leaked from a label");
     ok &= expect(lines_fit(hostile, 126),
                  "control characters broke the frame geometry");
+
+    // --- шов Surface: с активным Surface строки копятся, cout молчит,
+    //     а склейка буфера совпадает с прямой печатью байт-в-байт ------------
+    {
+        set_env("EYE_WIDTH", "126");
+        LongNames value;
+        const std::string direct = render_obj(value, 126, "surface");
+        eye::detail::Surface surface;
+        std::ostringstream leak;
+        std::streambuf* prev = std::cout.rdbuf(leak.rdbuf());
+        {
+            eye::detail::SurfaceScope scope(surface);
+            eye::inspect(value, "surface");
+        }
+        std::cout.rdbuf(prev);
+        ok &= expect(leak.str().empty(),
+                     "surface capture leaked lines to std::cout");
+        ok &= expect(!surface.lines.empty(), "surface captured no lines");
+        std::string joined;
+        for (const eye::detail::StyledLine& l : surface.lines) {
+            joined += l.s;
+            joined += '\n';
+            ok &= expect(l.w == eye::detail::vwidth_ansi(l.s),
+                         "styled line width is stale");
+        }
+        ok &= expect(joined == direct,
+                     "surface lines differ from direct inspect output");
+    }
 
     // Ненулевой адрес заведомо нельзя разыменовывать. Тест проходит, если
     // inspect() лишь выводит адрес и не падает на попытке прочитать int.
@@ -440,6 +559,27 @@ int main() {
     const std::string bo_out = render_obj(bases_only, 126, "basesonly");
     ok &= expect(bo_out.find("добавь EYE_DESCRIBE") != std::string::npos,
                  "inherited-eye_bases-only type not treated as opaque");
+
+    // --- регресс (Codex): полей больше, чем байтов — не ошибка сборки:
+    //     9 битовых полей — честное «скрыто», NUA-пустышки — разбор ----------
+    probe_ns::Bits9 bits{};
+    const std::string bits_out = render_obj(bits, 126, "bits");
+    ok &= expect(bits_out.find("добавь EYE_DESCRIBE") != std::string::npos,
+                 "bitfield-heavy aggregate is not honestly opaque");
+    // NUA: рендер различается по платформам (gcc: is_empty → полей 0; MSVC
+    // игнорирует [[no_unique_address]] → непрозрачный) — ассертим лишь то, что
+    // рендер состоялся и не упал: тип виден в картуше.
+    probe_ns::NuaAgg nua{};
+    const std::string nua_out = render_obj(nua, 126, "nua");
+    ok &= expect(nua_out.find("NuaAgg") != std::string::npos,
+                 "no_unique_address aggregate failed to render");
+
+    // --- регресс (Codex): агрегат с C-массивом разбирается автоматикой, а не
+    //     отвергается atomic-детектором (расхождение счётчиков там ложное) ----
+    probe_ns::ArrMix arr_mix{7, {'a', 'b', 'c', '\0'}};
+    const std::string arr_out = render_obj(arr_mix, 126, "arrmix");
+    ok &= expect(arr_out.find("полей 2") != std::string::npos,
+                 "aggregate with a C-array member is not auto-decomposed");
 
     // --- регресс (Codex): scoped enum рендерится через underlying, не «—» ------
     ok &= expect(eye::detail::stringify(Color::Blue) == "4",

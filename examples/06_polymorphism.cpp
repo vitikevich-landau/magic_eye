@@ -33,14 +33,18 @@ public:
 };
 
 int main() {
-    Hero hero;
-    eye::inspect(hero, "герой-новичок");
-
+    // ТЕРМИНАЛ → интерактивный обозреватель. У полиморфного корня раскрой узел
+    // «vptr» и переключи панель в режим [v] — блок-диаграмма vtable; режим [x]
+    // дампит слот vptr в живом объекте. Стрелки/Enter/m·p·v·x/q, ? — помощь.
+    Hero     hero;
     CragHack crag;
-    eye::inspect(crag, "Crag Hack (rage в хвосте базы)");
+    const Hero& base = crag;   // тот же объект через СТАТИЧЕСКИЙ тип базы
 
-    // Осмотр через ссылку на базу: статический тип у Ока — Hero&, а
-    // динамический в секции vtable — правда из RTTI: CragHack.
-    const Hero& base = crag;
-    eye::inspect(base, "Crag Hack через Hero&");
+    eye::Gallery{}
+        .add(hero, "герой-новичок")
+        .add(crag, "Crag Hack (rage в хвосте базы)")
+        // Тот же адрес, но статический тип — Hero: динамический в секции vtable
+        // всё равно CragHack (правда из RTTI).
+        .add(base, "Crag Hack через Hero&")
+        .run();
 }

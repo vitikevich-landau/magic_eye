@@ -1,8 +1,11 @@
 // ОКО МАГА / eye/detail/frame.hpp — РАМКИ: put, две зоны, картуш, разделители.
+//   Каждая рамочная строка собирается в СТРОКУ и уходит через emit_line
+//   (surface.hpp): без активного Surface — в std::cout, байт-в-байт как
+//   раньше; с ним — в буфер, откуда её заберёт TUI-панель или тест.
 #pragma once
-#include <iostream>
 #include <string>
 #include "geometry.hpp"
+#include "surface.hpp"
 #include "text.hpp"
 
 namespace eye::detail {
@@ -15,11 +18,14 @@ inline void put(const Line& ln) {
     const std::size_t fw = frame_width();
     const std::size_t body_w = std::min(ln.w, fw);
     const std::size_t pad = fw - body_w;
-    std::cout << margin_str()
-              << clr::grey() << "║" << clr::reset() << ' '
-              << (ln.w > fw ? clip_ansi(ln.s, fw) : ln.s)
-              << std::string(pad, ' ') << ' '
-              << clr::grey() << "║" << clr::reset() << '\n';
+    std::string out;
+    out += margin_str();
+    out += clr::grey(); out += "║"; out += clr::reset(); out += ' ';
+    out += ln.w > fw ? clip_ansi(ln.s, fw) : ln.s;
+    out.append(pad, ' ');
+    out += ' ';
+    out += clr::grey(); out += "║"; out += clr::reset();
+    emit_line(std::move(out));
 }
 
 // --- Двухзонная строка: │ <карта map_w> ║ <кодекс codex_w> │ -----------------
@@ -43,9 +49,12 @@ inline void put_two_zone(const Line& left, const Line& right) {
 //   j = "╥" открыть полосу · "╫" карточка-разделитель · "╨" закрыть.
 inline void frame_span2(const char* j) {
     const std::size_t mw = geo().map_w, cw = geo().codex_w;
-    std::cout << margin_str() << clr::grey()
-              << "╟" << dashes(mw + 1) << j << dashes(cw + 1) << "╢"
-              << clr::reset() << '\n';
+    std::string out;
+    out += margin_str();
+    out += clr::grey();
+    out += "╟"; out += dashes(mw + 1); out += j; out += dashes(cw + 1); out += "╢";
+    out += clr::reset();
+    emit_line(std::move(out));
 }
 // Рамочная строка с простым серым текстом (для сообщений).
 inline void put_text(const std::string& t) {
@@ -61,28 +70,34 @@ inline void frame_top(const std::string& title) {
     // Полная ширина между углами = fw+4. Фикс-части: ╔═(2)+◈╡ (3)+t+ ╞(2)+═◈═╗(4).
     const std::size_t used = 2 + 3 + vwidth(t) + 2 + 4;
     const std::size_t fill = fw + 4 > used ? fw + 4 - used : 1;
-    std::cout << margin_str()
-              << clr::grey() << "╔═" << clr::violet() << "◈╡ " << clr::reset()
-              << clr::gold() << t << clr::reset()
-              << clr::violet() << " ╞" << clr::grey() << dashes(fill)
-              << clr::violet() << "═◈" << clr::grey() << "═╗"
-              << clr::reset() << '\n';
+    std::string out;
+    out += margin_str();
+    out += clr::grey(); out += "╔═"; out += clr::violet(); out += "◈╡ "; out += clr::reset();
+    out += clr::gold(); out += t; out += clr::reset();
+    out += clr::violet(); out += " ╞"; out += clr::grey(); out += dashes(fill);
+    out += clr::violet(); out += "═◈"; out += clr::grey(); out += "═╗";
+    out += clr::reset();
+    emit_line(std::move(out));
 }
 // Разделитель секции — одинарный в двойную рамку:   ╟─ секция ─────────╢
 inline void frame_sep(const std::string& label) {
     const std::size_t fw = frame_width();
     const std::string l = clip(label, fw - 2);
     const std::size_t fill = fw - vwidth(l) - 1;
-    std::cout << margin_str()
-              << clr::grey() << "╟─ " << clr::reset()
-              << clr::gold() << l << clr::reset() << ' '
-              << clr::grey() << dashes(fill) << "╢" << clr::reset() << '\n';
+    std::string out;
+    out += margin_str();
+    out += clr::grey(); out += "╟─ "; out += clr::reset();
+    out += clr::gold(); out += l; out += clr::reset(); out += ' ';
+    out += clr::grey(); out += dashes(fill); out += "╢"; out += clr::reset();
+    emit_line(std::move(out));
 }
 // Низ рамки — двойная:   ╚══════════════════╝
 inline void frame_bottom() {
-    std::cout << margin_str()
-              << clr::grey() << "╚" << dashes(frame_width() + 2) << "╝"
-              << clr::reset() << '\n';
+    std::string out;
+    out += margin_str();
+    out += clr::grey(); out += "╚"; out += dashes(frame_width() + 2); out += "╝";
+    out += clr::reset();
+    emit_line(std::move(out));
 }
 
 } // namespace eye::detail
