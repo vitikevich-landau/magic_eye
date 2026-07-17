@@ -103,6 +103,20 @@ struct HasVecPimpl {
     EYE_DESCRIBE(HasVecPimpl, vp, svp)
 };
 
+// 6в) Умный указатель на VOID (type-erased владение): раньше сентинель «не
+//     умный указатель» сам был void, и shared_ptr<void> молча выпадал из всех
+//     веток — Enter не делал ничего. Обязан вести себя как сырой void*:
+//     адрес в превью + отказ «тип стёрт».
+struct VoidDel {
+    using pointer = void*;
+    void operator()(void*) const {}
+};
+struct HasVoidPtr {
+    std::shared_ptr<void> sv;
+    std::unique_ptr<void, VoidDel> uv;
+    EYE_DESCRIBE(HasVoidPtr, sv, uv)
+};
+
 // 7) Указатель на агрегат с atomic-членом: followable_v обязан спросить гейт
 //    проб (как visit_fields) и отказать СЛОВАМИ там, где авторазбор pointee
 //    сломался бы, — а не ронять сборку Gallery::add владельца указателя.
@@ -684,6 +698,20 @@ int main() {
         ok &= expect(out.find("тип неполный") != std::string::npos,
                      "incomplete pointee follow is not refused with a reason");
     }
+    // Умный указатель на void: как сырой void* — адрес виден, отказ словами.
+    {
+        int payload = 5;
+        HasVoidPtr hv;
+        hv.sv = std::shared_ptr<void>(&payload, [](void*) {});
+        const std::string out = run_with_script(
+            "enter down enter q",
+            [&](eye::Gallery& g) { g.add(hv, "стёртый тип"); });
+        ok &= expect(out.find("тип стёрт") != std::string::npos,
+                     "void smart pointer follow is not refused with a reason");
+        ok &= expect(out.find("умный указатель на void") != std::string::npos,
+                     "void smart pointer is not labeled as such");
+    }
+
     // vector с неполным элементом: сборка живёт, переход отказывает словами.
     {
         int stub = 0;

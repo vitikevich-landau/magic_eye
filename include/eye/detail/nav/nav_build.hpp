@@ -59,7 +59,12 @@ template <class T>
 using vector_element_t = typename vector_element<std::remove_cvref_t<T>>::type;
 
 // Умные указатели: unique_ptr / shared_ptr — переход через .get().
-template <class T> struct smart_pointee { using type = void; };
+// Сентинель «это НЕ умный указатель» — отдельный тип, а не void: раньше
+// настоящий shared_ptr<void> (легитимное type-erased владение) был неотличим
+// от «не умного указателя» и молча выпадал из всех веток — Enter/g не делали
+// ничего, хотя сырой void* честно говорит «тип стёрт» (ревью Codex, PR #5).
+struct no_smart_pointee {};
+template <class T> struct smart_pointee { using type = no_smart_pointee; };
 template <class V, class D> struct smart_pointee<std::unique_ptr<V, D>> {
     using type = V;
 };
@@ -69,10 +74,10 @@ template <class V> struct smart_pointee<std::shared_ptr<V>> { using type = V; };
 // «инициализировать const int(*)[] из int*» — жёсткая ошибка сборки. Да и
 // переходить там некуда: длину массив не несёт (ревью Codex, PR #5).
 template <class V, class D> struct smart_pointee<std::unique_ptr<V[], D>> {
-    using type = void;
+    using type = no_smart_pointee;
 };
 template <class V> struct smart_pointee<std::shared_ptr<V[]>> {
-    using type = void;
+    using type = no_smart_pointee;
 };
 // …и только если .get() РЕАЛЬНО отдаёт V*. У unique_ptr с кастомным делетером
 // может быть свой FD::pointer (fancy pointer, handle-обёртка) — тогда .get()
@@ -87,7 +92,8 @@ struct smart_get_plain<T, std::void_t<decltype(std::declval<const T&>().get())>>
 
 template <class T>
 inline constexpr bool is_smart_ptr_v =
-    !std::is_void_v<typename smart_pointee<std::remove_cvref_t<T>>::type> &&
+    !std::is_same_v<typename smart_pointee<std::remove_cvref_t<T>>::type,
+                    no_smart_pointee> &&
     smart_get_plain<std::remove_cvref_t<T>>::value;
 
 // Умный указатель на МАССИВ — отдельным трейтом, чтобы отказать честно
@@ -198,7 +204,12 @@ void arm_follow(NavNode& n, const FT& field, const std::string& via) {
         using V = typename smart_pointee<U0>::type;
         const V* p = field.get();          // приведение указателя полноты не требует
         n.preview = p == nullptr ? "→ ∅" : "→ " + hexptr(p);
-        if constexpr (is_complete_v<V>) {
+        if constexpr (std::is_void_v<std::remove_cv_t<V>>) {
+            // shared_ptr<void>: тип стёрт нарочно — не «неполный», а void;
+            // отказ от перехода сформулирует arm_follow_to (та же ветка, что
+            // у сырого void*).
+            n.type = "умный указатель на void";
+        } else if constexpr (is_complete_v<V>) {
             // Полное имя unique_ptr не влезает в строку дерева — очеловечиваем;
             // точный тип остаётся в панели деталей.
             n.type = "умный указатель на " + type_name<V>();
