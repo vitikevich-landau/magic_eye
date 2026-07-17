@@ -117,6 +117,16 @@ struct HasVoidPtr {
     EYE_DESCRIBE(HasVoidPtr, sv, uv)
 };
 
+// 6г) Указатель на агрегат, где полей больше, чем байтов (9 битовых полей в
+//     4 байтах): followable_v инстанцирует пробники счёта для pointee, и
+//     прежний ограничитель sizeof+1 ронял сборку Gallery::add владельца.
+//     Теперь пробник тотальный (потолок), тип честно непрозрачен.
+struct Bits9 { unsigned a:1,b:1,c:1,d:1,e:1,f:1,g:1,h:1,i:1; };
+struct HasBitsPtr {
+    Bits9* p = nullptr;
+    EYE_DESCRIBE(HasBitsPtr, p)
+};
+
 // 7) Указатель на агрегат с atomic-членом: followable_v обязан спросить гейт
 //    проб (как visit_fields) и отказать СЛОВАМИ там, где авторазбор pointee
 //    сломался бы, — а не ронять сборку Gallery::add владельца указателя.
@@ -698,6 +708,19 @@ int main() {
         ok &= expect(out.find("тип неполный") != std::string::npos,
                      "incomplete pointee follow is not refused with a reason");
     }
+    // Указатель на битовополевой агрегат: сборка живёт (главная регрессия —
+    // сам факт компиляции), переход работает и показывает честное «скрыто».
+    {
+        Bits9 bits{};
+        HasBitsPtr hb;
+        hb.p = &bits;
+        const std::string out = run_with_script(
+            "enter down enter q",
+            [&](eye::Gallery& g) { g.add(hb, "битовые поля"); });
+        ok &= expect(out.find("Bits9") != std::string::npos,
+                     "bitfield-heavy pointee did not follow");
+    }
+
     // Умный указатель на void: как сырой void* — адрес виден, отказ словами.
     {
         int payload = 5;

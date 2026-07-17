@@ -22,6 +22,27 @@ static_assert(eye::detail::brace_probe_consistent_v<NestedAgg>,
               "детектор ложно сработал на вложенном агрегате");
 static_assert(eye::detail::brace_probe_consistent_v<StrAgg>,
               "детектор ложно сработал на агрегате со std::string");
+// Полей больше, чем байтов, — валидно: битовые поля и [[no_unique_address]].
+// Прежний ограничитель пробников (sizeof+1) РОНЯЛ на таких типах сборку даже
+// inspect. Теперь пробник тотальный: 9+ полей — потолок FIELD_COUNT_CAP и
+// честное «скрыто», а компактная пустышечная структура разбирается (Codex).
+struct Bits9 { unsigned a:1,b:1,c:1,d:1,e:1,f:1,g:1,h:1,i:1; };
+struct Empt1 {}; struct Empt2 {}; struct Empt3 {};
+struct NuaAgg {
+    [[no_unique_address]] Empt1 e1;
+    [[no_unique_address]] Empt2 e2;
+    [[no_unique_address]] Empt3 e3;
+};
+static_assert(eye::detail::field_count<Bits9>() > 8,
+              "9 битовых полей должны упереться в потолок, а не в ошибку");
+// NuaAgg: braced-проба честно даёт 0 (пустышка отвергает {any} как агрегат без
+// членов), flat — 3 (any конвертируется в E напрямую). Расхождение безвредно:
+// при нуле полей раскладки нет, гейт молчит. Ассертим только тотальность —
+// сам факт, что эти строки скомпилировались; точные значения — деталь платформ
+// (MSVC вообще игнорирует [[no_unique_address]] без msvc::-префикса).
+static_assert(eye::detail::field_count<NuaAgg>() <= 8,
+              "пробник должен пережить [[no_unique_address]], не взорвавшись");
+
 // C-массив создаёт расхождение счётчиков ЛОЖНО (elision в flat-пробе), и
 // детектор обязан его пропускать: field_count для массива верен, structured
 // bindings отдают его одной привязкой, разбор работает (Codex, PR #5).
@@ -538,6 +559,20 @@ int main() {
     const std::string bo_out = render_obj(bases_only, 126, "basesonly");
     ok &= expect(bo_out.find("добавь EYE_DESCRIBE") != std::string::npos,
                  "inherited-eye_bases-only type not treated as opaque");
+
+    // --- регресс (Codex): полей больше, чем байтов — не ошибка сборки:
+    //     9 битовых полей — честное «скрыто», NUA-пустышки — разбор ----------
+    probe_ns::Bits9 bits{};
+    const std::string bits_out = render_obj(bits, 126, "bits");
+    ok &= expect(bits_out.find("добавь EYE_DESCRIBE") != std::string::npos,
+                 "bitfield-heavy aggregate is not honestly opaque");
+    // NUA: рендер различается по платформам (gcc: is_empty → полей 0; MSVC
+    // игнорирует [[no_unique_address]] → непрозрачный) — ассертим лишь то, что
+    // рендер состоялся и не упал: тип виден в картуше.
+    probe_ns::NuaAgg nua{};
+    const std::string nua_out = render_obj(nua, 126, "nua");
+    ok &= expect(nua_out.find("NuaAgg") != std::string::npos,
+                 "no_unique_address aggregate failed to render");
 
     // --- регресс (Codex): агрегат с C-массивом разбирается автоматикой, а не
     //     отвергается atomic-детектором (расхождение счётчиков там ложное) ----

@@ -20,11 +20,22 @@ constexpr bool braced_constructible(std::index_sequence<Is...>) {
     return requires { T{ { any_slot<Is>{} }... }; };
 }
 
+// Потолок пробников. Точный счёт нужен только до 8 (лимит visit_fields ниже):
+// всё, что больше, одинаково уходит в «не разобрать автоматикой», поэтому 9
+// означает «больше лимита, сколько именно — не важно». Прежний ограничитель
+// static_assert(N <= sizeof(T)+1) предполагал «одно поле — минимум байт» и
+// РОНЯЛ СБОРКУ на валидных типах, где полей больше, чем байтов: битовые поля
+// (9 × unsigned:1 в 4 байтах) и [[no_unique_address]]-пустышки. Пробник обязан
+// быть тотальным: неудобный тип — это «скрыто», а не ошибка компиляции у
+// пользователя (ревью Codex, PR #5).
+inline constexpr std::size_t FIELD_COUNT_CAP = 9;
+
 template <class T, std::size_t N = 0>
 constexpr std::size_t field_count() {
-    static_assert(N <= sizeof(T) + 1, "field_count: разбег");
-    if constexpr (braced_constructible<T>(std::make_index_sequence<N>{})
-              && !braced_constructible<T>(std::make_index_sequence<N + 1>{}))
+    if constexpr (N >= FIELD_COUNT_CAP)
+        return FIELD_COUNT_CAP;
+    else if constexpr (braced_constructible<T>(std::make_index_sequence<N>{})
+                   && !braced_constructible<T>(std::make_index_sequence<N + 1>{}))
         return N;
     else
         return field_count<T, N + 1>();
@@ -43,9 +54,10 @@ constexpr bool flat_constructible(std::index_sequence<Is...>) {
 }
 template <class T, std::size_t N = 0>
 constexpr std::size_t flat_field_count() {
-    static_assert(N <= sizeof(T) + 1, "flat_field_count: разбег");
-    if constexpr (flat_constructible<T>(std::make_index_sequence<N>{})
-              && !flat_constructible<T>(std::make_index_sequence<N + 1>{}))
+    if constexpr (N >= FIELD_COUNT_CAP)     // тот же потолок, что у field_count
+        return FIELD_COUNT_CAP;
+    else if constexpr (flat_constructible<T>(std::make_index_sequence<N>{})
+                   && !flat_constructible<T>(std::make_index_sequence<N + 1>{}))
         return N;
     else
         return flat_field_count<T, N + 1>();
@@ -91,8 +103,11 @@ void visit_fields(const T& obj, F&& f) {
     // brace_probe_consistent_v). Лечится одной строкой EYE_DESCRIBE. Иначе тип
     // молча ушёл бы в кривой structured binding и упал бы глубоко внутри.
     // C-массив расхождение создаёт ЛОЖНО (см. has_array_member_v) — его
-    // пропускаем: field_count для него верен и разбор работает.
-    static_assert(brace_probe_consistent_v<T> || has_array_member_v<T>,
+    // пропускаем: field_count для него верен и разбор работает. При нуле полей
+    // гейт молчит: раскладки не будет вовсе, а расхождение проб на пустышках
+    // ([[no_unique_address]]: braced=0, flat=N) безвредно (Codex, PR #5).
+    static_assert(field_count<T>() == 0 || brace_probe_consistent_v<T> ||
+                      has_array_member_v<T>,
         "ОКО МАГА: этот агрегат нельзя разобрать автоматически — в нём есть "
         "член, ломающий подсчёт полей (обычно std::atomic / std::mutex или "
         "иной некопируемый тип). РЕШЕНИЕ: добавь в тип макрос "
